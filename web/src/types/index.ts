@@ -6,6 +6,14 @@ export interface EncodeResult {
     height: number;
 }
 
+export interface MultiFrameEncodeResult {
+    frame_count: number;
+    width: number;
+    height: number;
+    get_frame(index: number): Uint8Array;
+    free(): void;
+}
+
 export interface DecodeResult {
     file_bytes: Uint8Array;
     filename: string;

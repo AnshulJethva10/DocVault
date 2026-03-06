@@ -6,8 +6,8 @@ mod encoder;
 mod metadata;
 
 // Re-export the WASM-bound functions
-pub use decoder::decode_file;
-pub use encoder::encode_file;
+pub use decoder::{decode_file, decode_file_multi};
+pub use encoder::{encode_file, encode_file_multi};
 
 /// Initialize panic hook for better error messages in the browser console
 #[wasm_bindgen(start)]
@@ -18,5 +18,5 @@ pub fn init() {
 /// Returns the current version of docvault-core
 #[wasm_bindgen]
 pub fn get_version() -> String {
-    "1.0.0".to_string()
+    "1.1.0".to_string()
 }

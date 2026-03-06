@@ -46,6 +46,7 @@ pnpm-debug.log
 *.temp
 /tmp/
 test.txt
+context.md
 
 # agent skills
 /.agent

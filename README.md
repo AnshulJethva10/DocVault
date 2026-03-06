@@ -9,7 +9,7 @@
 
 *Your files, disguised.*
 
-**DocVault** disguises any document as a PNG image using **AES-256-GCM** encryption. It allows you to store sensitive documents in cloud services that only accept photos or videos. The cloud provider never sees your actual content. The application executes 100% client-side via **Rust** and **WebAssembly**. Your files never leave your device. The encoded image appears as visual noise and remains indecipherable without the exact password.
+**DocVault** disguises any document as a PNG image or AVI video using **AES-256-GCM** encryption. It allows you to store sensitive documents in cloud services that only accept photos or videos. The cloud provider never sees your actual content. The application executes 100% client-side via **Rust** and **WebAssembly**. Your files never leave your device. The encoded output appears as visual noise and remains indecipherable without the exact password.
 
 ## Preview
 
@@ -23,24 +23,25 @@ The DocVault interface encoding a sensitive document into a secure, disguised PN
 ```text
 ENCODE                              DECODE
 ──────                              ──────
-📄 document.pdf                     🖼️  document_vaulted.png
+📄 document.pdf                     🖼️  document.vault.png
+      │                              (or 🎬 document.vault.avi)
+      ▼                                       │
+ AES-256-GCM                         Read RGB Pixels
+ Encryption                          (from PNG or AVI frames)
       │                                       │
       ▼                                       ▼
- AES-256-GCM                         Read RGB Pixels
- Encryption                                   │
-      │                                       ▼
-      ▼                                Extract Metadata
- Byte → RGB                           (salt, IV, filename)
- Pixel Mapping                                │
-      │                                       ▼
-      ▼                                AES-256-GCM
-🖼️  document_vaulted.png              Decryption
-  (looks like noise)                          │
+ Byte → RGB                          Extract Metadata
+ 1024×1024 Frames                    (salt, IV, filename, frame count)
+      │                                       │
+      ▼                                       ▼
+ ≤1 frame → 🖼️ .vault.png           AES-256-GCM
+ >1 frame → 🎬 .vault.avi           Decryption
+  (MPNG lossless codec)                       │
                                               ▼
                                       📄 document.pdf ✓
 ```
 
-Each 3 bytes of encrypted data map to one **RGB pixel**. The resulting PNG looks like abstract noise. DocVault embeds **metadata** including the `salt`, `IV`, and original `filename` in the first row of pixels.
+Each 3 bytes of encrypted data map to one **RGB pixel**. All frames are fixed at **1024×1024 pixels**. Files that fit in a single frame (~≤3 MB) produce a PNG. Larger files are split across multiple frames and packaged into an **AVI video** using the lossless **MPNG (Motion PNG)** codec. DocVault embeds **metadata** including the `salt`, `IV`, `filename`, and `total_frames` in the first pixels.
 
 ## Features
 
@@ -50,7 +51,7 @@ Each 3 bytes of encrypted data map to one **RGB pixel**. The resulting PNG looks
 | **PBKDF2** | Secure key derivation. | Executes `310,000` iterations to thwart brute-force attacks. |
 | **Zero Server** | 100% client-side processing. | Makes zero network requests and completely lacks telemetry. |
 | **Rust Core** | High-performance WebAssembly engine. | Delivers native-like cryptographic speeds inside your browser. |
-| **Adaptive Output** | PNG or Video output format. | Creates PNGs for files ≤ 10MB and WebM for files > 10MB. |
+| **Adaptive Output** | PNG or AVI video output. | Creates a single 1024×1024 PNG for files ≤ ~3 MB, or a multi-frame AVI video (MPNG lossless codec) for larger files. |
 | **Lossless Recovery** | Exact byte-for-byte decryption. | Returns your original file with the exact original filename. |
 | **Self-Contained** | Metadata travels with pixels. | Requires no external database or key files. |
 | **Open Source** | Fully verifiable code. | Uses the MIT license for absolute transparency. |
@@ -66,9 +67,9 @@ DocVault derives the encryption key using **PBKDF2-HMAC-SHA256** with `310,000` 
 ### What DocVault Does NOT Protect Against
 
 ⚠️ **Limitations:**
-- Does not hide the fact that a PNG file exists.
+- Does not hide the fact that a PNG or AVI file exists.
 - Security depends entirely on your password strength.
-- The encoded image requires more storage than the original file.
+- The encoded output requires more storage than the original file.
 - We have not formally audited this software.
 
 ## Getting Started
@@ -115,15 +116,17 @@ docvault/
 ├── crates/
 │   └── docvault-core/        # Rust crate (compiles to WASM)
 │       └── src/
-│           ├── lib.rs        # wasm-bindgen exports
+│           ├── lib.rs        # wasm-bindgen exports (v1.1.0)
 │           ├── crypto.rs     # AES-256-GCM + PBKDF2
-│           ├── encoder.rs    # Byte → RGB pixel encoding
-│           ├── decoder.rs    # RGB pixel → byte decoding
-│           └── metadata.rs   # VaultMetadata struct (276 bytes)
+│           ├── encoder.rs    # Fixed 1024×1024 multi-frame encoding
+│           ├── decoder.rs    # Single-frame & multi-frame decoding
+│           └── metadata.rs   # VaultMetadata (276 bytes, includes total_frames)
 └── web/                      # React + Vite frontend
     └── src/
         ├── hooks/
-        │   └── useDocVault.ts    # WASM bridge hook
+        │   └── useDocVault.ts    # WASM bridge hook (PNG + AVI flows)
+        ├── utils/
+        │   └── aviMuxer.ts       # AVI muxer/parser (MPNG lossless codec)
         └── components/           # UI components
 ```
 
@@ -135,19 +138,20 @@ docvault/
 3. Drag & drop or select any file (e.g., `quarterly_report.pdf`)
 4. Enter a strong password
 5. Click **Encode & Download**
-6. Save `quarterly_report_vaulted.png` to your photo cloud storage
+6. For small files (≤ ~3 MB): saves as `quarterly_report.vault.png`
+7. For larger files: saves as `quarterly_report.vault.avi` (playable in VLC)
 
 ### Decoding a File
 1. Open DocVault
 2. Click **Decode** tab
-3. Drop the `.png` file you previously encoded
+3. Drop the `.vault.png` or `.vault.avi` file you previously encoded
 4. Enter the same password
 5. Click **Decode & Restore**
 6. Your original file downloads automatically
 
 > ⚠️ **Password Warning:** There is no password recovery mechanism. If you forget your password, the file cannot be recovered. Store your password safely.
 
-> 📝 **Note:** The encoded PNG uses slightly more storage than the original file due to pixel padding and PNG metadata overhead.
+> 📝 **Note:** The encoded output uses more storage than the original file due to pixel padding and PNG/AVI container overhead.
 
 ## Built With
 
@@ -167,7 +171,8 @@ docvault/
 
 - [x] AES-256-GCM file encoding to PNG
 - [x] PBKDF2 key derivation with 310K iterations
-- [x] Video encoding for files > 10MB
+- [x] Fixed 1024×1024 frame encoding with multi-frame support
+- [x] AVI video output (MPNG lossless codec) for large files
 - [x] React + WASM browser app
 - [ ] CLI tool (native Rust binary, same core)
 - [ ] Batch encoding (multiple files at once)

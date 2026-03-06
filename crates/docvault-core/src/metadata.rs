@@ -1,6 +1,5 @@
-use serde::{Deserialize, Serialize};
 
-/// Total metadata size in bytes: 4 + 1 + 8 + 32 + 12 + 128 + 64 + 27 = 276
+/// Total metadata size in bytes: 4 + 1 + 8 + 32 + 12 + 128 + 64 + 2 + 25 = 276
 pub const METADATA_SIZE: usize = 276;
 /// Number of pixels needed to store metadata (276 bytes / 3 bytes per pixel = 92 pixels)
 pub const METADATA_PIXELS: usize = 92;
@@ -18,11 +17,24 @@ pub struct VaultMetadata {
     pub iv: [u8; 12],
     pub filename: [u8; 128],
     pub mime_type: [u8; 64],
-    pub reserved: [u8; 27],
+    /// Total number of frames (1 = single PNG, >1 = multi-frame video)
+    pub total_frames: u16,
+    pub reserved: [u8; 25],
 }
 
 impl VaultMetadata {
     pub fn new(filename: &str, mime_type: &str, file_size: u64, salt: [u8; 32], iv: [u8; 12]) -> Self {
+        Self::new_with_frames(filename, mime_type, file_size, salt, iv, 1)
+    }
+
+    pub fn new_with_frames(
+        filename: &str,
+        mime_type: &str,
+        file_size: u64,
+        salt: [u8; 32],
+        iv: [u8; 12],
+        total_frames: u16,
+    ) -> Self {
         let mut fname_buf = [0u8; 128];
         let fname_bytes = filename.as_bytes();
         let fname_len = fname_bytes.len().min(128);
@@ -41,21 +53,23 @@ impl VaultMetadata {
             iv,
             filename: fname_buf,
             mime_type: mime_buf,
-            reserved: [0u8; 27],
+            total_frames,
+            reserved: [0u8; 25],
         }
     }
 
     /// Serialize metadata to exactly 276 bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(METADATA_SIZE);
-        buf.extend_from_slice(&self.magic);          // 4 bytes
-        buf.push(self.version);                       // 1 byte
-        buf.extend_from_slice(&self.file_size.to_le_bytes()); // 8 bytes
-        buf.extend_from_slice(&self.salt);            // 32 bytes
-        buf.extend_from_slice(&self.iv);              // 12 bytes
-        buf.extend_from_slice(&self.filename);        // 128 bytes
-        buf.extend_from_slice(&self.mime_type);       // 64 bytes
-        buf.extend_from_slice(&self.reserved);        // 27 bytes
+        buf.extend_from_slice(&self.magic);                        // 4 bytes
+        buf.push(self.version);                                    // 1 byte
+        buf.extend_from_slice(&self.file_size.to_le_bytes());      // 8 bytes
+        buf.extend_from_slice(&self.salt);                         // 32 bytes
+        buf.extend_from_slice(&self.iv);                           // 12 bytes
+        buf.extend_from_slice(&self.filename);                     // 128 bytes
+        buf.extend_from_slice(&self.mime_type);                    // 64 bytes
+        buf.extend_from_slice(&self.total_frames.to_le_bytes());   // 2 bytes
+        buf.extend_from_slice(&self.reserved);                     // 25 bytes
         debug_assert_eq!(buf.len(), METADATA_SIZE);
         buf
     }
@@ -100,8 +114,18 @@ impl VaultMetadata {
         mime_type.copy_from_slice(&data[offset..offset + 64]);
         offset += 64;
 
-        let mut reserved = [0u8; 27];
-        reserved.copy_from_slice(&data[offset..offset + 27]);
+        // total_frames: 2 bytes (little-endian u16)
+        let mut tf_bytes = [0u8; 2];
+        tf_bytes.copy_from_slice(&data[offset..offset + 2]);
+        let total_frames = u16::from_le_bytes(tf_bytes);
+        offset += 2;
+
+        let mut reserved = [0u8; 25];
+        reserved.copy_from_slice(&data[offset..offset + 25]);
+
+        // Backward compatibility: old images had 0 in the total_frames bytes
+        // Treat 0 as 1 (single frame)
+        let total_frames = if total_frames == 0 { 1 } else { total_frames };
 
         Ok(VaultMetadata {
             magic,
@@ -111,6 +135,7 @@ impl VaultMetadata {
             iv,
             filename,
             mime_type,
+            total_frames,
             reserved,
         })
     }

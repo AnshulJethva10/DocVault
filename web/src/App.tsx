@@ -45,8 +45,9 @@ export default function App() {
         }
         setPasswordError(false);
         try {
-            const blob = await encodeFile(file, password);
-            const encodedName = file.name.replace(/\.[^.]+$/, '') + '.vault.png';
+            const { blob, isVideo } = await encodeFile(file, password);
+            const ext = isVideo ? '.vault.avi' : '.vault.png';
+            const encodedName = file.name.replace(/\.[^.]+$/, '') + ext;
             triggerDownload(blob, encodedName);
         } catch (err) {
             console.error('Encode error:', err);
@@ -115,7 +116,7 @@ export default function App() {
                                 <div className="card__section-header">
                                     <h2 className="card__heading">Encrypt & Disguise</h2>
                                     <p className="card__description">
-                                        Select any file. It will be encrypted securely and encoded visually into a PNG image.
+                                        Select any file. It will be encrypted and encoded into a PNG (≤3 MB) or an AVI video (larger files).
                                     </p>
                                 </div>
                                 <DropZone onFile={setFile} label="Select file to encrypt" accept="*/*" file={file} onClear={() => setFile(null)} />
@@ -153,10 +154,10 @@ export default function App() {
                                 <div className="card__section-header">
                                     <h2 className="card__heading">Decrypt & Restore</h2>
                                     <p className="card__description">
-                                        Select an image encoded by DocVault to decrypt and restore the original file.
+                                        Select a DocVault file (.vault.png or .vault.avi) to decrypt and restore the original.
                                     </p>
                                 </div>
-                                <DropZone onFile={setFile} label="Select .vault.png image" accept="image/png" file={file} onClear={() => setFile(null)} />
+                                <DropZone onFile={setFile} label="Select .vault.png or .vault.avi" accept="image/png,video/avi,video/x-msvideo,.avi" file={file} onClear={() => setFile(null)} />
                             </div>
 
                             <div className="password-section">
