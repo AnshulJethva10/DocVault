@@ -52,6 +52,7 @@ Each 3 bytes of encrypted data map to one **RGB pixel**. All frames are fixed at
 | **Zero Server** | 100% client-side processing. | Makes zero network requests and completely lacks telemetry. |
 | **Rust Core** | High-performance WebAssembly engine. | Delivers native-like cryptographic speeds inside your browser. |
 | **Adaptive Output** | PNG or AVI video output. | Creates a single 1024×1024 PNG for files ≤ ~3 MB, or a multi-frame AVI video (MPNG lossless codec) for larger files. |
+| **Batch Encoding** | Encode multiple files at once. | Select multiple files, encrypt them all with one password. Per-file progress tracking with individual and bulk download. |
 | **Lossless Recovery** | Exact byte-for-byte decryption. | Returns your original file with the exact original filename. |
 | **Self-Contained** | Metadata travels with pixels. | Requires no external database or key files. |
 | **Open Source** | Fully verifiable code. | Uses the MIT license for absolute transparency. |
@@ -132,14 +133,15 @@ docvault/
 
 ## Usage
 
-### Encoding a File
+### Encoding Files
 1. Open DocVault in your browser
 2. Click **Encode** tab
-3. Drag & drop or select any file (e.g., `quarterly_report.pdf`)
+3. Drag & drop or select one or more files (batch encoding supported)
 4. Enter a strong password
-5. Click **Encode & Download**
-6. For small files (≤ ~3 MB): saves as `quarterly_report.vault.png`
-7. For larger files: saves as `quarterly_report.vault.avi` (playable in VLC)
+5. Click **Encode & Download** (single file) or **Encode N Files** (batch)
+6. For small files (≤ ~3 MB): saves as `.vault.png`
+7. For larger files: saves as `.vault.avi` (playable in VLC)
+8. In batch mode, each file shows individual progress and a download button; click **Download All** when finished
 
 ### Decoding a File
 1. Open DocVault
@@ -174,8 +176,8 @@ docvault/
 - [x] Fixed 1024×1024 frame encoding with multi-frame support
 - [x] AVI video output (MPNG lossless codec) for large files
 - [x] React + WASM browser app
+- [x] Batch encoding (multiple files at once)
 - [ ] CLI tool (native Rust binary, same core)
-- [ ] Batch encoding (multiple files at once)
 - [ ] Filename obfuscation option
 - [ ] Drag-to-reorder encoded image collections
 - [ ] Desktop app (Tauri wrapper)
