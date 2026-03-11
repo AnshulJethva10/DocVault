@@ -765,4 +765,261 @@
   .footer-dot {
     color: var(--border-strong);
   }
+
+  /* ---------------------------------
+       Batch Drop Zone
+       --------------------------------- */
+  .batch-dropzone {
+    position: relative;
+  }
+
+  .batch-dropzone--disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .batch-dropzone__badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background-color: var(--accent);
+    color: #fff;
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    padding: 4px 10px;
+    border-radius: 12px;
+    animation: popIn 260ms cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+  }
+
+  /* ---------------------------------
+       Batch File List
+       --------------------------------- */
+  .batch-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .batch-list__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .batch-list__count {
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .batch-list__items {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 280px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-default) transparent;
+  }
+
+  .batch-list__items::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .batch-list__items::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .batch-list__items::-webkit-scrollbar-thumb {
+    background-color: var(--border-default);
+    border-radius: 2px;
+  }
+
+  /* Individual batch item */
+  .batch-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background-color: var(--bg-base);
+    border: 1px solid var(--border-subtle);
+    transition: all 150ms ease;
+    animation: fadeUpIn 200ms ease forwards;
+  }
+
+  .batch-item:hover {
+    border-color: var(--border-default);
+  }
+
+  .batch-item--processing {
+    border-left: 2px solid var(--accent);
+  }
+
+  .batch-item--done {
+    border-left: 2px solid var(--success);
+  }
+
+  .batch-item--error {
+    border-left: 2px solid var(--error);
+  }
+
+  .batch-item__left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .batch-item__file-icon {
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+  }
+
+  .batch-item--done .batch-item__file-icon {
+    color: var(--success);
+  }
+
+  .batch-item--error .batch-item__file-icon {
+    color: var(--error);
+  }
+
+  .batch-item__status-icon {
+    flex-shrink: 0;
+  }
+
+  .batch-item__status-icon--pending {
+    color: var(--text-tertiary);
+  }
+
+  .batch-item__status-icon--processing {
+    color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+
+  .batch-item__status-icon--done {
+    color: var(--success);
+  }
+
+  .batch-item__status-icon--error {
+    color: var(--error);
+  }
+
+  .batch-item__info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .batch-item__name {
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    font-size: 12px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+  }
+
+  .batch-item__meta {
+    font-family: 'DM Mono', monospace;
+    font-weight: 400;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.03em;
+  }
+
+  .batch-item__error-text {
+    color: var(--error);
+  }
+
+  .batch-item__right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    margin-left: 12px;
+  }
+
+  /* Mini inline progress bar */
+  .batch-item__progress-track {
+    width: 60px;
+    height: 3px;
+    background-color: var(--border-subtle);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .batch-item__progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-text));
+    border-radius: 2px;
+    transition: width 200ms ease-out;
+  }
+
+  /* Item action buttons */
+  .batch-item__download,
+  .batch-item__remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    border: 1px solid var(--border-default);
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 150ms ease;
+  }
+
+  .batch-item__download:hover {
+    background: var(--accent-glow);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .batch-item__remove:hover {
+    background: rgba(248, 113, 113, 0.08);
+    border-color: var(--error);
+    color: var(--error);
+  }
+
+  /* Download All button */
+  .batch-list__download-all {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    height: 36px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 150ms ease;
+    margin-top: 4px;
+  }
+
+  .batch-list__download-all:hover {
+    background: var(--accent-glow);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
 }

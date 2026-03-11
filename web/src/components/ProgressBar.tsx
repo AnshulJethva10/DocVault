@@ -4,8 +4,8 @@ interface ProgressBarProps {
 }
 
 export function ProgressBar({ progress, message }: ProgressBarProps) {
-    // Convert 0-1 to 0-100%
-    const percent = Math.round(progress * 100);
+    // progress is already 0–100 from the hook
+    const percent = Math.min(100, Math.max(0, Math.round(progress)));
 
     return (
         <div className="progress-container" id="progress-bar" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>

@@ -1,7 +1,9 @@
 import { useState, useCallback } from 'react';
-import type { AppMode } from './types';
+import type { AppMode, BatchFileItem } from './types';
 import { useDocVault } from './hooks/useDocVault';
 import { DropZone } from './components/DropZone';
+import { BatchDropZone } from './components/BatchDropZone';
+import { BatchFileList } from './components/BatchFileList';
 import { PasswordInput } from './components/PasswordInput';
 import { ProgressBar } from './components/ProgressBar';
 import { ImagePreview } from './components/ImagePreview';
@@ -22,14 +24,16 @@ function triggerDownload(blob: Blob, filename: string) {
 export default function App() {
     const [mode, setMode] = useState<AppMode>('encode');
     const [file, setFile] = useState<File | null>(null);
+    const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
     const [password, setPassword] = useState('');
     const [passwordError, setPasswordError] = useState(false);
-    const { status, previewBlob, encodeFile, decodeFile, reset } = useDocVault();
+    const { status, previewBlob, encodeFile, encodeBatch, decodeFile, reset } = useDocVault();
 
     const handleModeSwitch = useCallback(
         (newMode: AppMode) => {
             setMode(newMode);
             setFile(null);
+            setBatchFiles([]);
             setPassword('');
             setPasswordError(false);
             reset();
@@ -37,22 +41,77 @@ export default function App() {
         [reset]
     );
 
-    const handleEncode = useCallback(async () => {
-        if (!file) return;
+    // --- Batch encode helpers ---
+    const handleAddFiles = useCallback((files: File[]) => {
+        const newItems: BatchFileItem[] = files.map((f) => ({
+            id: crypto.randomUUID(),
+            file: f,
+            status: 'pending' as const,
+            progress: 0,
+            message: '',
+        }));
+        setBatchFiles((prev) => [...prev, ...newItems]);
+    }, []);
+
+    const handleRemoveFile = useCallback((id: string) => {
+        setBatchFiles((prev) => prev.filter((f) => f.id !== id));
+    }, []);
+
+    const handleFileDownload = useCallback((item: BatchFileItem) => {
+        if (item.outputBlob && item.outputFilename) {
+            triggerDownload(item.outputBlob, item.outputFilename);
+        }
+    }, []);
+
+    const handleDownloadAll = useCallback(() => {
+        batchFiles
+            .filter((f) => f.status === 'done' && f.outputBlob && f.outputFilename)
+            .forEach((f) => {
+                triggerDownload(f.outputBlob!, f.outputFilename!);
+            });
+    }, [batchFiles]);
+
+    const handleBatchEncode = useCallback(async () => {
+        if (batchFiles.length === 0) return;
         if (!password) {
             setPasswordError(true);
             return;
         }
         setPasswordError(false);
-        try {
-            const { blob, isVideo } = await encodeFile(file, password);
-            const ext = isVideo ? '.vault.avi' : '.vault.png';
-            const encodedName = file.name.replace(/\.[^.]+$/, '') + ext;
-            triggerDownload(blob, encodedName);
-        } catch (err) {
-            console.error('Encode error:', err);
+
+        // If only one file, use single-file flow for auto-download + preview
+        if (batchFiles.length === 1) {
+            try {
+                const singleFile = batchFiles[0].file;
+                const { blob, isVideo } = await encodeFile(singleFile, password);
+                const ext = isVideo ? '.vault.avi' : '.vault.png';
+                const encodedName = singleFile.name.replace(/\.[^.]+$/, '') + ext;
+                triggerDownload(blob, encodedName);
+
+                // Update batch item state to reflect done
+                setBatchFiles((prev) =>
+                    prev.map((f) => ({
+                        ...f,
+                        status: 'done' as const,
+                        progress: 100,
+                        message: `Done`,
+                        outputBlob: blob,
+                        outputFilename: encodedName,
+                        isVideo,
+                    }))
+                );
+            } catch {
+                // encodeFile already sets error status
+            }
+            return;
         }
-    }, [file, password, encodeFile]);
+
+        await encodeBatch(batchFiles, password, (fileId, patch) => {
+            setBatchFiles((prev) =>
+                prev.map((f) => (f.id === fileId ? { ...f, ...patch } : f))
+            );
+        });
+    }, [batchFiles, password, encodeFile, encodeBatch]);
 
     const handleDecode = useCallback(async () => {
         if (!file) return;
@@ -116,11 +175,25 @@ export default function App() {
                                 <div className="card__section-header">
                                     <h2 className="card__heading">Encrypt & Disguise</h2>
                                     <p className="card__description">
-                                        Select any file. It will be encrypted and encoded into a PNG (≤3 MB) or an AVI video (larger files).
+                                        Select one or more files. Each will be encrypted and encoded into a PNG (≤3 MB) or an AVI video (larger files).
                                     </p>
                                 </div>
-                                <DropZone onFile={setFile} label="Select file to encrypt" accept="*/*" file={file} onClear={() => setFile(null)} />
+                                <BatchDropZone
+                                    onFiles={handleAddFiles}
+                                    label="Select files to encrypt"
+                                    accept="*/*"
+                                    fileCount={batchFiles.length}
+                                    disabled={isProcessing}
+                                />
                             </div>
+
+                            <BatchFileList
+                                items={batchFiles}
+                                onRemove={handleRemoveFile}
+                                onDownload={handleFileDownload}
+                                onDownloadAll={handleDownloadAll}
+                                disabled={isProcessing}
+                            />
 
                             <div className="password-section">
                                 <span className="section-label">Encryption Key</span>
@@ -137,15 +210,21 @@ export default function App() {
 
                             <button
                                 className="action-btn"
-                                onClick={handleEncode}
-                                disabled={!file || isProcessing}
+                                onClick={handleBatchEncode}
+                                disabled={batchFiles.length === 0 || isProcessing}
                             >
                                 {isProcessing ? (
                                     <div className="action-btn__spinner" />
                                 ) : (
                                     <Lock size={16} />
                                 )}
-                                <span>{isProcessing ? 'ENCRYPTING...' : 'ENCODE & DOWNLOAD'}</span>
+                                <span>
+                                    {isProcessing
+                                        ? 'ENCRYPTING...'
+                                        : batchFiles.length > 1
+                                            ? `ENCODE ${batchFiles.length} FILES`
+                                            : 'ENCODE & DOWNLOAD'}
+                                </span>
                             </button>
                         </>
                     ) : (
