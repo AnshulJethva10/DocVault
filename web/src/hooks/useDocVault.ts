@@ -81,19 +81,24 @@ export function useDocVault() {
       password,
     );
 
-    const frameCount = result.frame_count;
-    const width = result.width;
-    const height = result.height;
+    try {
+      const frameCount = result.frame_count;
+      const width = result.width;
+      const height = result.height;
 
-    if (frameCount === 1) {
-      onProgress?.(70, "Generating image...");
-      const rgba = result.get_frame(0);
-      result.free();
+      if (frameCount < 1) {
+        throw new Error("Encoder returned no frames");
+      }
 
-      onProgress?.(90, "Exporting PNG...");
-      const blob = await frameToPngBlob(rgba, width, height);
-      return { blob, isVideo: false };
-    } else {
+      if (frameCount === 1) {
+        onProgress?.(70, "Generating image...");
+        const rgba = result.get_frame(0);
+
+        onProgress?.(90, "Exporting PNG...");
+        const blob = await frameToPngBlob(rgba, width, height);
+        return { blob, isVideo: false };
+      }
+
       onProgress?.(55, `Rendering ${frameCount} frames...`);
 
       const pngBlobs: Blob[] = [];
@@ -107,11 +112,11 @@ export function useDocVault() {
         pngBlobs.push(pngBlob);
       }
 
-      result.free();
-
       onProgress?.(90, "Building AVI video...");
       const aviBlob = await createAviFromPngFrames(pngBlobs, width, height, 1);
       return { blob: aviBlob, isVideo: true };
+    } finally {
+      result.free();
     }
   };
 
@@ -271,18 +276,22 @@ export function useDocVault() {
     file: File,
   ): Promise<{ rgba: Uint8Array; width: number; height: number }> => {
     const imageBitmap = await createImageBitmap(file);
-    const canvas = document.createElement("canvas");
-    canvas.width = imageBitmap.width;
-    canvas.height = imageBitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Failed to create canvas context");
-    ctx.drawImage(imageBitmap, 0, 0);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    return {
-      rgba: new Uint8Array(imageData.data.buffer),
-      width: canvas.width,
-      height: canvas.height,
-    };
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = imageBitmap.width;
+      canvas.height = imageBitmap.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Failed to create canvas context");
+      ctx.drawImage(imageBitmap, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      return {
+        rgba: new Uint8Array(imageData.data.buffer),
+        width: canvas.width,
+        height: canvas.height,
+      };
+    } finally {
+      imageBitmap.close();
+    }
   };
 
   /**
@@ -290,16 +299,24 @@ export function useDocVault() {
    */
   const extractPixelsFromPngBlob = async (
     pngBlob: Blob,
-  ): Promise<Uint8Array> => {
+  ): Promise<{ rgba: Uint8Array; width: number; height: number }> => {
     const bitmap = await createImageBitmap(pngBlob);
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Failed to create canvas context");
-    ctx.drawImage(bitmap, 0, 0);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    return new Uint8Array(imageData.data.buffer);
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Failed to create canvas context");
+      ctx.drawImage(bitmap, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      return {
+        rgba: new Uint8Array(imageData.data.buffer),
+        width: canvas.width,
+        height: canvas.height,
+      };
+    } finally {
+      bitmap.close();
+    }
   };
 
   /**
@@ -335,6 +352,10 @@ export function useDocVault() {
           const pngFrames = await extractPngFramesFromAvi(file);
           const frameCount = pngFrames.length;
 
+          if (frameCount === 0) {
+            throw new Error("AVI file did not contain any DocVault frames");
+          }
+
           // Extract RGBA pixels from each PNG frame
           const frameRgbaSize = FRAME_WIDTH * FRAME_HEIGHT * 4;
           const allFramesRgba = new Uint8Array(frameCount * frameRgbaSize);
@@ -345,7 +366,14 @@ export function useDocVault() {
               message: `Extracting frame ${i + 1} of ${frameCount}...`,
               progress: 20 + Math.floor((i / frameCount) * 30),
             });
-            const rgba = await extractPixelsFromPngBlob(pngFrames[i]);
+            const { rgba, width, height } = await extractPixelsFromPngBlob(
+              pngFrames[i],
+            );
+            if (width !== FRAME_WIDTH || height !== FRAME_HEIGHT) {
+              throw new Error(
+                `Invalid AVI frame dimensions at frame ${i + 1}: expected ${FRAME_WIDTH}×${FRAME_HEIGHT}, got ${width}×${height}`,
+              );
+            }
             allFramesRgba.set(rgba, i * frameRgbaSize);
           }
 
@@ -362,22 +390,25 @@ export function useDocVault() {
             password,
           );
 
-          setStatus({
-            type: "processing",
-            message: "Restoring file...",
-            progress: 80,
-          });
-          const fileBytesCopy = result.file_bytes.slice();
-          const filename = result.filename;
-          const mimeType = result.mime_type;
-          result.free();
+          try {
+            setStatus({
+              type: "processing",
+              message: "Restoring file...",
+              progress: 80,
+            });
+            const fileBytesCopy = result.file_bytes.slice();
+            const filename = result.filename;
+            const mimeType = result.mime_type;
 
-          const fileBlob = new Blob([fileBytesCopy], {
-            type: mimeType || "application/octet-stream",
-          });
+            const fileBlob = new Blob([fileBytesCopy], {
+              type: mimeType || "application/octet-stream",
+            });
 
-          setStatus({ type: "success", message: `✅ Restored: ${filename}` });
-          return { blob: fileBlob, filename };
+            setStatus({ type: "success", message: `✅ Restored: ${filename}` });
+            return { blob: fileBlob, filename };
+          } finally {
+            result.free();
+          }
         } else {
           // Single-frame PNG decode
           setStatus({
@@ -394,22 +425,25 @@ export function useDocVault() {
           });
           const result = wasm.decode_file(rgba, width, height, password);
 
-          setStatus({
-            type: "processing",
-            message: "Restoring file...",
-            progress: 80,
-          });
-          const fileBytesCopy = result.file_bytes.slice();
-          const filename = result.filename;
-          const mimeType = result.mime_type;
-          result.free();
+          try {
+            setStatus({
+              type: "processing",
+              message: "Restoring file...",
+              progress: 80,
+            });
+            const fileBytesCopy = result.file_bytes.slice();
+            const filename = result.filename;
+            const mimeType = result.mime_type;
 
-          const fileBlob = new Blob([fileBytesCopy], {
-            type: mimeType || "application/octet-stream",
-          });
+            const fileBlob = new Blob([fileBytesCopy], {
+              type: mimeType || "application/octet-stream",
+            });
 
-          setStatus({ type: "success", message: `✅ Restored: ${filename}` });
-          return { blob: fileBlob, filename };
+            setStatus({ type: "success", message: `✅ Restored: ${filename}` });
+            return { blob: fileBlob, filename };
+          } finally {
+            result.free();
+          }
         }
       } catch (err: any) {
         console.error("WASM Decode Error:", err);

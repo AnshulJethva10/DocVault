@@ -11,6 +11,8 @@
 
 **DocVault** disguises any document as a PNG image or AVI video using **AES-256-GCM** encryption. It allows you to store sensitive documents in cloud services that only accept photos or videos. The cloud provider never sees your actual content. The application executes 100% client-side via **Rust** and **WebAssembly**. Your files never leave your device. The encoded output appears as visual noise and remains indecipherable without the exact password.
 
+Recent robustness work tightened error handling, improved cleanup of WebAssembly-backed objects during encode/decode flows, and added stricter validation for extracted AVI frame dimensions during restore.
+
 ## Preview
 
 <!-- Add a screenshot here -->
@@ -54,6 +56,7 @@ Each 3 bytes of encrypted data map to one **RGB pixel**. All frames are fixed at
 | **Adaptive Output** | PNG or AVI video output. | Creates a single 1024×1024 PNG for files ≤ ~3 MB, or a multi-frame AVI video (MPNG lossless codec) for larger files. |
 | **Batch Encoding** | Encode multiple files at once. | Select multiple files, encrypt them all with one password. Per-file progress tracking with individual and bulk download. |
 | **Lossless Recovery** | Exact byte-for-byte decryption. | Returns your original file with the exact original filename. |
+| **Robust Decoding** | Stricter container validation. | Rejects malformed AVI inputs more clearly and validates extracted frame dimensions before multi-frame decode. |
 | **Self-Contained** | Metadata travels with pixels. | Requires no external database or key files. |
 | **Open Source** | Fully verifiable code. | Uses the MIT license for absolute transparency. |
 
@@ -151,6 +154,11 @@ docvault/
 5. Click **Decode & Restore**
 6. Your original file downloads automatically
 
+DocVault now performs stricter validation during restore:
+- standard PNG decodes continue through the single-frame path
+- AVI restores validate that extracted frames match the expected fixed `1024×1024` format before decryption
+- malformed or non-DocVault AVI inputs fail earlier with clearer errors instead of proceeding with ambiguous decode behavior
+
 > ⚠️ **Password Warning:** There is no password recovery mechanism. If you forget your password, the file cannot be recovered. Store your password safely.
 
 > 📝 **Note:** The encoded output uses more storage than the original file due to pixel padding and PNG/AVI container overhead.
@@ -185,6 +193,14 @@ docvault/
 ## Contributing
 
 We welcome issues and pull requests on the GitHub repository. This project uses Rust for the core and React for the UI. Familiarity with `wasm-bindgen` is extremely helpful for core contributions.
+
+### Recent Fixes
+- fixed frontend error-message handling so encode/decode failures surface the intended message consistently
+- narrowed AVI detection in the decode flow to avoid treating arbitrary `.avi` files as DocVault containers too eagerly
+- added safer cleanup patterns around WebAssembly-backed encode/decode results to reduce the risk of leaked Rust-side allocations
+- released image bitmap resources after pixel extraction in browser decode flows
+- added guards against invalid empty-frame AVI construction
+- added validation for extracted AVI frame dimensions before multi-frame decryption
 
 ## License
 
