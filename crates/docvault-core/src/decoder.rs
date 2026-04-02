@@ -1,8 +1,15 @@
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 use crate::crypto;
 use crate::metadata::{VaultMetadata, METADATA_SIZE};
 
+// ─── DecodeResult ─────────────────────────────────────────────────────────────
+
+/// Result of a successful decode operation.
+/// WASM: fields exposed via js_sys getters.
+/// Native: fields are plain `pub`.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub struct DecodeResult {
     file_bytes: Vec<u8>,
@@ -10,6 +17,7 @@ pub struct DecodeResult {
     mime_type: String,
 }
 
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 impl DecodeResult {
     #[wasm_bindgen(getter)]
@@ -26,7 +34,17 @@ impl DecodeResult {
     }
 }
 
-/// Extract RGB bytes from a single RGBA frame (discards alpha channel).
+#[cfg(not(feature = "wasm"))]
+#[derive(Debug)]
+pub struct DecodeResult {
+    pub file_bytes: Vec<u8>,
+    pub filename: String,
+    pub mime_type: String,
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Extract RGB bytes from a single RGBA frame (discards the alpha channel).
 fn extract_rgb_from_rgba(rgba_pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let pixel_count = (width * height) as usize;
     let expected_rgba_len = pixel_count * 4;
@@ -49,14 +67,12 @@ fn extract_rgb_from_rgba(rgba_pixels: &[u8], width: u32, height: u32) -> Result<
     Ok(rgb_bytes)
 }
 
-/// Internal decode from concatenated RGB bytes.
+/// Core decode from concatenated RGB bytes (shared by single and multi-frame paths).
 fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, String> {
-    // Check we have enough data for metadata
     if rgb_bytes.len() < METADATA_SIZE {
         return Err("Image too small to contain DocVault metadata".to_string());
     }
 
-    // Extract and parse metadata
     let metadata = VaultMetadata::from_bytes(&rgb_bytes[..METADATA_SIZE])?;
 
     if !metadata.validate_magic() {
@@ -64,17 +80,12 @@ fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, Str
     }
 
     if metadata.version != 1 {
-        return Err(format!(
-            "Unsupported DocVault format version: {}",
-            metadata.version
-        ));
+        return Err(format!("Unsupported DocVault format version: {}", metadata.version));
     }
 
-    // Derive AES key from password + salt
     let key = crypto::derive_key(password.as_bytes(), &metadata.salt)?;
 
-    // The ciphertext starts right after metadata
-    // AES-256-GCM ciphertext length = original_size + 16 (GCM tag)
+    // AES-256-GCM ciphertext = plaintext + 16-byte GCM tag
     let ciphertext_len = metadata.file_size as usize + 16;
     let ciphertext_start = METADATA_SIZE;
     let ciphertext_end = ciphertext_start + ciphertext_len;
@@ -84,11 +95,8 @@ fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, Str
     }
 
     let ciphertext = &rgb_bytes[ciphertext_start..ciphertext_end];
-
-    // Decrypt
     let plaintext = crypto::decrypt(ciphertext, &key, &metadata.iv)?;
 
-    // Trim to original file size
     let file_size = metadata.file_size as usize;
     if plaintext.len() < file_size {
         return Err("Decrypted data shorter than expected file size".to_string());
@@ -96,12 +104,14 @@ fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, Str
 
     Ok(DecodeResult {
         file_bytes: plaintext[..file_size].to_vec(),
-        filename: metadata.filename_str(),
-        mime_type: metadata.mime_type_str(),
+        filename:   metadata.filename_str(),
+        mime_type:  metadata.mime_type_str(),
     })
 }
 
-/// Decode a single-frame encoded image (RGBA pixel data) back to the original file.
+// ─── Public pure-Rust API ─────────────────────────────────────────────────────
+
+/// Decode a single-frame vault image (RGBA pixel data) back to the original file.
 pub fn decode(
     rgba_pixels: &[u8],
     width: u32,
@@ -112,9 +122,10 @@ pub fn decode(
     decode_from_rgb(&rgb_bytes, password)
 }
 
-/// Decode a multi-frame encoded video back to the original file.
-/// `frames_rgba` is a flat buffer containing all frames concatenated.
-/// Each frame is `width * height * 4` bytes of RGBA pixel data.
+/// Decode a multi-frame vault video back to the original file.
+///
+/// `frames_rgba` is a flat buffer with all frames concatenated.
+/// Each frame is `width × height × 4` bytes of RGBA pixel data.
 pub fn decode_multi(
     frames_rgba: &[u8],
     frame_count: u32,
@@ -132,7 +143,6 @@ pub fn decode_multi(
         ));
     }
 
-    // Concatenate RGB bytes from all frames
     let mut all_rgb = Vec::new();
     for i in 0..frame_count as usize {
         let start = i * frame_rgba_size;
@@ -144,7 +154,10 @@ pub fn decode_multi(
     decode_from_rgb(&all_rgb, password)
 }
 
-/// WASM-exported single-frame decode function.
+// ─── WASM-exported wrappers ───────────────────────────────────────────────────
+
+/// WASM export: single-frame decode.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn decode_file(
     rgba_pixels: &[u8],
@@ -156,8 +169,8 @@ pub fn decode_file(
         .map_err(|e| JsValue::from_str(&e))
 }
 
-/// WASM-exported multi-frame decode function.
-/// `frames_rgba` is a flat buffer with all frames concatenated.
+/// WASM export: multi-frame decode.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn decode_file_multi(
     frames_rgba: &[u8],
@@ -168,4 +181,58 @@ pub fn decode_file_multi(
 ) -> Result<DecodeResult, JsValue> {
     decode_multi(frames_rgba, frame_count, width, height, password)
         .map_err(|e| JsValue::from_str(&e))
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, not(feature = "wasm")))]
+mod tests {
+    use super::*;
+    use crate::encoder;
+
+    fn round_trip(data: &[u8], password: &str) -> DecodeResult {
+        let enc = encoder::encode_multi(data, "test.bin", "application/octet-stream", password)
+            .expect("encode failed");
+        let frame_count = enc.frame_count;
+        decode_multi(&enc.frames_data, frame_count, enc.width, enc.height, password)
+            .expect("decode failed")
+    }
+
+    #[test]
+    fn round_trip_small_file() {
+        let original = b"Hello, this is a small test file!";
+        let result = round_trip(original, "correct-password");
+        assert_eq!(result.file_bytes, original);
+        assert_eq!(result.filename, "test.bin");
+    }
+
+    #[test]
+    fn round_trip_large_file() {
+        let original: Vec<u8> = (0..4_000_000).map(|i| (i % 251) as u8).collect();
+        let result = round_trip(&original, "large-file-password");
+        assert_eq!(result.file_bytes, original);
+    }
+
+    #[test]
+    fn wrong_password_returns_error() {
+        let data = b"Secret document contents";
+        let enc = encoder::encode_multi(data, "doc.txt", "text/plain", "correct")
+            .expect("encode failed");
+        let err = decode_multi(&enc.frames_data, enc.frame_count, enc.width, enc.height, "wrong");
+        assert!(err.is_err(), "wrong password must return an error");
+        let msg = err.unwrap_err();
+        assert!(
+            msg.contains("Invalid password") || msg.contains("corrupted"),
+            "error message should mention invalid password, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn invalid_magic_returns_error() {
+        // Build a valid RGBA frame filled with zeros (no DCVT magic)
+        let fake_rgba = vec![0u8; 1024 * 1024 * 4];
+        let err = decode(&fake_rgba, 1024, 1024, "password");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("magic"), "should mention magic bytes");
+    }
 }

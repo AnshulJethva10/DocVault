@@ -1,0 +1,37 @@
+[package]
+name = "docvault-cli"
+version = "0.1.0"
+edition = "2021"
+description = "DocVault CLI — encrypt and disguise files from the terminal"
+
+[[bin]]
+name = "docvault"
+path = "src/main.rs"
+
+[dependencies]
+# Crypto core — no WASM bindings for native
+docvault-core = { path = "../docvault-core", default-features = false }
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1.0"
+
+# PNG image I/O
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Terminal progress bars
+indicatif = "0.17"
+
+# MIME type detection from filename
+mime_guess = "2.0"
+
+# Interactive hidden password prompt
+rpassword = "7"
+
+[dev-dependencies]
+tempfile    = "3"
+assert_cmd  = "2"
+predicates  = "3"
+image       = { version = "0.25", default-features = false, features = ["png"] }

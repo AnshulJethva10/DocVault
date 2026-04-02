@@ -1,0 +1,146 @@
+## Framework-internal configuration — not indexed by Antigravity IDE.
+## Workflows read these values at runtime; do not move into .agent/.
+version: "1.0"
+framework: antigravity-ultimate-sdlc
+
+# Active council (set by /council command)
+active_council: planning
+
+# Governance mode (set by /init or /new-cycle based on feature count)
+# lightweight: <8 features — combined planning, abbreviated audit/validation
+# standard: 8-25 features — full pipeline, multi-run available
+# enterprise: 25+ features — full pipeline + formal ADRs + mandatory multi-run + external scans
+governance_mode: standard
+
+# Project type (set by /init — determines wave presets, feature categories, verification layers)
+# web-app | cli-tool | library | api-service | ml-pipeline | mobile-app | custom
+# See .context/project-presets.md for per-type configuration
+project_type: web-app
+
+# Council configurations
+councils:
+  planning:
+    phases:
+      - "1"      # Discovery
+      - "1.5"    # Deliberation
+      - "2"      # Architecture
+      - "2.5"    # Feature Deep-Dive Analysis
+      - "3"      # Features
+      - "3.5"    # AIOU Decomposition
+      - "4"      # Security
+      - "5"      # Testing Strategy
+      - "6"      # Infrastructure
+      - "7"      # Sprint Planning
+      - "8"      # Launch Ready
+    gates:
+      - "1.5"    # Feature completeness (anti-truncation)
+      - "3.5"    # AIOU decomposition complete (per run)
+      - "8"      # Launch ready (per run)
+    models:
+      deep_reasoning: "claude-opus-4-6"     # Thorough analysis, gate verification, architecture (alt: gemini-2.5-pro)
+      fast_execution: "claude-sonnet-4-5"   # Standard execution, code generation, routine tasks (alt: gemini-2.5-flash)
+
+  development:
+    waves:
+      - "0-1"  # Types, Interfaces & Utilities (combined — see README)
+      # Waves 0 and 1 are combined into /dev-wave-1 because Types and Utilities are tightly coupled
+      - 2  # Data Layer
+      - 3  # Services
+      - 4  # API Layer
+      - 5  # UI Components
+      - 6  # Integration
+    gates:
+      - "I4"  # Services complete
+      - "I8"  # Pre-deployment
+    models:
+      default: "claude-sonnet-4-5"          # For Claude Code environments
+      default_antigravity: "gemini-3-flash"  # For Antigravity IDE — Flash outperforms Pro at 15x lower cost
+      ui_visual: "gemini-3-flash"            # Flash handles UI well; Pro has memory issues
+      ui_logic: "claude-opus-4-6"
+
+  audit:
+    tracks:
+      - testing      # T1-T5 (must complete first)
+      - audit        # A1-A3 (requires T5 complete)
+      # enhancement track removed from Audit — now in Validation Council
+    parallel_execution: false  # Tracks are strictly sequential: Testing → Audit → Enhancement
+    gates:
+      - "T3"  # GUI analysis
+      - "A2"  # Completeness
+      - "A3"  # Quality assessment
+    models:
+      testing: "claude-sonnet-4-5"
+      assessment: "claude-opus-4-6"
+
+  validation:
+    tracks:
+      - validation   # V1-V5
+      - correction   # C1-C4
+      - production   # P1-P4
+      - enhancement  # E1-E4
+      - synthesis    # S1-S2
+    sequential: true  # Tracks are sequential EXCEPT: Enhancement (E1-E4) can parallel Production (P1-P4) after Gate C4
+    gates:
+      - "V5"  # Correction plan
+      - "C4"  # Regression validation
+      - "P4"  # Security hardened
+      - "E4"  # UX polished
+      - "S2"  # Release ready
+    models:
+      analysis: "claude-opus-4-6"
+      correction: "claude-sonnet-4-5"
+
+# Planning thoroughness settings
+planning:
+  batch_threshold: 8        # Features >= this triggers batch mode
+  batch_size_max: 5         # Maximum features per batch (target 3-5)
+
+# Development thoroughness settings
+development:
+  max_aious_per_run: 15     # Maximum AIOUs in a single run
+  max_effort_per_run: 45    # Maximum effort units per run
+  feature_verification: true    # Require /dev-verify-feature for all features
+  connectivity_verification: true  # Require connectivity matrix verification in Wave 6
+  tdd_default: true             # TDD (Red-Green-Refactor) is the default AIOU execution pattern
+
+# Thoroughness audit settings
+thoroughness:
+  audit_batch_size: 5          # Features per audit batch (3-5)
+  severity_threshold: major    # Default severity filter for remediation
+
+# Quality settings
+quality:
+  test_coverage:
+    unit: 80
+    integration: 70
+  require_security_checklist: true
+  require_before_after_proof: true
+  require_runtime_verification: true
+  performance:
+    p99_threshold_ms: 500    # Default; override per project in config.yml
+    lighthouse_score: 90     # web-app project_type only
+    ttfb_ms: 200            # Time to first byte (web-app only)
+    cli_startup_ms: 100     # cli-tool project_type only
+
+# Evidence requirements
+evidence:
+  artifact_naming: "{TYPE}-{ID}"
+  # Valid TYPE values:
+  # - FEAT: Feature specification
+  # - AIOU: AI-Implementable Output Unit
+  # - ADR: Architecture Decision Record
+  # - DEF: Defect
+  # - ENH: Enhancement
+  # - CORR: Correction
+  # - GATE: Gate evidence
+  # - SS: Screenshot
+  # - TEST: Test result
+  # Example: FEAT-001, AIOU-003, DEF-012, SS-login-before
+  screenshot_required_for_defects: true
+  handoff_required_between_councils: true
+
+# State files
+state:
+  context: "project-context.md"
+  progress: "progress.md"
+  council_state_dir: "council-state"

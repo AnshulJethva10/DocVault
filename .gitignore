@@ -50,3 +50,34 @@ context.md
 
 # agent skills
 /.agent
+# --- Antigravity Ultimate SDLC Framework (runtime state) ---
+council-state/*/WORKING-MEMORY.md
+.memory/
+.agent/logs/
+.agent/temp/
+.agent/cache/
+.agent/sessions/
+.DS_Store
+*.tmp
+*.swp
+Thumbs.db
+# --- End Antigravity Framework ---
+
+# DocVault Encoded Outputs
+*.vault.png
+*.vault.avi
+
+# Agent Files
+.context/
+.cycles/
+.reference/
+.stitch/
+assets/
+ARCHITECTURE.md
+handoffs/
+specs/
+templates/
+
+# Extras
+funky_docvault_redesign_v2.png
+screen.png

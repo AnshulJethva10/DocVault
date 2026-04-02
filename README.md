@@ -3,6 +3,7 @@
   <img src="https://img.shields.io/badge/built%20with-Rust-orange.svg" alt="Built with Rust">
   <img src="https://img.shields.io/badge/architecture-100%25%20Client--Side-success.svg" alt="100% Client-Side">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-red.svg" alt="AES-256-GCM">
+  <img src="https://img.shields.io/badge/CLI-native%20binary-blueviolet.svg" alt="Native CLI">
 </p>
 
 # 🔐 DocVault
@@ -52,9 +53,10 @@ Each 3 bytes of encrypted data map to one **RGB pixel**. All frames are fixed at
 | **AES-256-GCM** | Authenticated encryption mode. | Guarantees confidentiality and prevents tampering. |
 | **PBKDF2** | Secure key derivation. | Executes `310,000` iterations to thwart brute-force attacks. |
 | **Zero Server** | 100% client-side processing. | Makes zero network requests and completely lacks telemetry. |
-| **Rust Core** | High-performance WebAssembly engine. | Delivers native-like cryptographic speeds inside your browser. |
+| **Rust Core** | High-performance engine for browser & terminal. | WASM for the browser; a native binary (`docvault`) for the CLI. |
+| **Native CLI** | `docvault` terminal binary. | Encrypt and decrypt files directly from the shell — no browser required. |
 | **Adaptive Output** | PNG or AVI video output. | Creates a single 1024×1024 PNG for files ≤ ~3 MB, or a multi-frame AVI video (MPNG lossless codec) for larger files. |
-| **Batch Encoding** | Encode multiple files at once. | Select multiple files, encrypt them all with one password. Per-file progress tracking with individual and bulk download. |
+| **Batch Encoding** | Encode multiple files at once. | Web: select multiple files with one password. CLI: pass multiple paths to `docvault encode`. |
 | **Lossless Recovery** | Exact byte-for-byte decryption. | Returns your original file with the exact original filename. |
 | **Robust Decoding** | Stricter container validation. | Rejects malformed AVI inputs more clearly and validates extracted frame dimensions before multi-frame decode. |
 | **Self-Contained** | Metadata travels with pixels. | Requires no external database or key files. |
@@ -84,7 +86,7 @@ DocVault derives the encryption key using **PBKDF2-HMAC-SHA256** with `310,000` 
 - Rust WASM target: `rustup target add wasm32-unknown-unknown`
 - Node.js 18+ and npm 9+
 
-### Installation & Build
+### Web App
 
 ```bash
 # 1. Clone the repository
@@ -105,7 +107,17 @@ npm run dev
 
 Then open `http://localhost:5173`.
 
-### Production Build
+### CLI Tool
+
+```bash
+# Build the native binary (no WASM toolchain required)
+cargo build --release -p docvault-cli
+
+# Optional: install system-wide
+cargo install --path crates/docvault-cli
+```
+
+### Production Build (web)
 
 ```bash
 cd web
@@ -118,25 +130,36 @@ npm run build
 ```text
 docvault/
 ├── crates/
-│   └── docvault-core/        # Rust crate (compiles to WASM)
+│   ├── docvault-core/        # Rust crate — dual target (WASM + native)
+│   │   └── src/
+│   │       ├── lib.rs        # wasm-bindgen exports (feature-gated)
+│   │       ├── crypto.rs     # AES-256-GCM + PBKDF2
+│   │       ├── encoder.rs    # Fixed 1024×1024 multi-frame encoding
+│   │       ├── decoder.rs    # Single-frame & multi-frame decoding
+│   │       └── metadata.rs   # VaultMetadata (276 bytes)
+│   └── docvault-cli/         # Native Rust binary (`docvault`)
 │       └── src/
-│           ├── lib.rs        # wasm-bindgen exports (v1.1.0)
-│           ├── crypto.rs     # AES-256-GCM + PBKDF2
-│           ├── encoder.rs    # Fixed 1024×1024 multi-frame encoding
-│           ├── decoder.rs    # Single-frame & multi-frame decoding
-│           └── metadata.rs   # VaultMetadata (276 bytes, includes total_frames)
+│           ├── main.rs       # Entry point + dispatch
+│           ├── cli.rs        # clap argument definitions
+│           ├── pixel_io.rs   # PNG frame I/O (image crate)
+│           ├── avi.rs        # AVI muxer/parser (MPNG codec, Rust port)
+│           └── commands/
+│               ├── encode.rs # `docvault encode` implementation
+│               └── decode.rs # `docvault decode` implementation
 └── web/                      # React + Vite frontend
     └── src/
         ├── hooks/
         │   └── useDocVault.ts    # WASM bridge hook (PNG + AVI flows)
         ├── utils/
-        │   └── aviMuxer.ts       # AVI muxer/parser (MPNG lossless codec)
+        │   └── aviMuxer.ts       # AVI muxer/parser (TypeScript, browser)
         └── components/           # UI components
 ```
 
 ## Usage
 
-### Encoding Files
+### Web App
+
+#### Encoding Files
 1. Open DocVault in your browser
 2. Click **Encode** tab
 3. Drag & drop or select one or more files (batch encoding supported)
@@ -146,7 +169,7 @@ docvault/
 7. For larger files: saves as `.vault.avi` (playable in VLC)
 8. In batch mode, each file shows individual progress and a download button; click **Download All** when finished
 
-### Decoding a File
+#### Decoding a File
 1. Open DocVault
 2. Click **Decode** tab
 3. Drop the `.vault.png` or `.vault.avi` file you previously encoded
@@ -154,14 +177,51 @@ docvault/
 5. Click **Decode & Restore**
 6. Your original file downloads automatically
 
-DocVault now performs stricter validation during restore:
-- standard PNG decodes continue through the single-frame path
-- AVI restores validate that extracted frames match the expected fixed `1024×1024` format before decryption
-- malformed or non-DocVault AVI inputs fail earlier with clearer errors instead of proceeding with ambiguous decode behavior
-
 > ⚠️ **Password Warning:** There is no password recovery mechanism. If you forget your password, the file cannot be recovered. Store your password safely.
 
 > 📝 **Note:** The encoded output uses more storage than the original file due to pixel padding and PNG/AVI container overhead.
+
+### CLI (`docvault`)
+
+#### Encrypt a file
+
+```bash
+# Password via flag
+docvault encode report.pdf --password "my secret"
+# → report.vault.png  (or report.vault.avi for large files)
+
+# Password via environment variable (great for scripts)
+DOCVAULT_PASSWORD="my secret" docvault encode report.pdf
+
+# Interactive hidden prompt (nothing shown, nothing logged)
+docvault encode report.pdf
+# Encryption password: ▌
+
+# Save to a specific output directory
+docvault encode report.pdf --output ~/vault/
+```
+
+#### Encrypt multiple files at once
+
+```bash
+docvault encode *.pdf --password "my secret" --output ~/vault/
+# ⠹ [1/3] Encrypting report.pdf…
+# ⠹ [2/3] Encrypting invoice.pdf…
+# ⠹ [3/3] Encrypting contract.pdf…
+# ✔  3/3 files encoded successfully
+```
+
+#### Decrypt a vault file
+
+```bash
+docvault decode report.vault.png --password "my secret"
+# → report.pdf  (restored in the same directory)
+
+# Restore to a different directory
+docvault decode report.vault.avi --output ~/restored/
+```
+
+> 📝 **Interoperability:** `.vault.png` and `.vault.avi` files produced by the CLI can be decoded by the web app, and vice versa. The format is identical.
 
 ## Built With
 
@@ -171,6 +231,11 @@ DocVault now performs stricter validation during restore:
 | **wasm-pack** | WASM compilation and packaging | Latest |
 | **wasm-bindgen** | JavaScript to Rust interop | Latest |
 | **ring** | Cryptographic primitives (AES, PBKDF2) | Latest |
+| **clap** | CLI argument parsing (`docvault` binary) | 4.x |
+| **image** | PNG frame encode/decode (CLI) | 0.25 |
+| **indicatif** | Terminal progress spinner (CLI) | 0.17 |
+| **rpassword** | Secure hidden password prompt (CLI) | 7.x |
+| **mime_guess** | MIME type detection from filename (CLI) | 2.x |
 | **React** | Interactive user interface | 18.x |
 | **TypeScript** | Type-safe frontend logic | 5.x |
 | **Vite** | Frontend bundling and development server | 5.x |
@@ -185,8 +250,9 @@ DocVault now performs stricter validation during restore:
 - [x] AVI video output (MPNG lossless codec) for large files
 - [x] React + WASM browser app
 - [x] Batch encoding (multiple files at once)
-- [ ] CLI tool (native Rust binary, same core)
+- [x] CLI tool (native Rust binary, same core — web & CLI files are interoperable)
 - [ ] Filename obfuscation option
+- [ ] Shell completions for the `docvault` binary
 - [ ] Drag-to-reorder encoded image collections
 - [ ] Desktop app (Tauri wrapper)
 

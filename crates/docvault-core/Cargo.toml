@@ -6,14 +6,31 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# ─── Feature flags ────────────────────────────────────────────────────────────
+# "wasm" (default): enables wasm-bindgen exports for the browser/wasm-pack build
+# No features:      compiles as a plain Rust library for native use (docvault-cli)
+[features]
+default = ["wasm"]
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:js-sys",
+    "dep:console_error_panic_hook",
+    "dep:serde-wasm-bindgen",
+    "getrandom/js",
+    "ring/wasm32_unknown_unknown_js",
+]
+
 [dependencies]
-wasm-bindgen = "0.2"
-ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
-serde = { version = "1", features = ["derive"] }
-serde-wasm-bindgen = "0.6"
-js-sys = "0.3"
-getrandom = { version = "0.2", features = ["js"] }
-console_error_panic_hook = "0.1"
+# WASM-only deps — gated behind the "wasm" feature
+wasm-bindgen          = { version = "0.2", optional = true }
+js-sys                = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+serde-wasm-bindgen    = { version = "0.6", optional = true }
+
+# Always-on deps
+ring      = { version = "0.17" }
+serde     = { version = "1", features = ["derive"] }
+getrandom = { version = "0.2" }   # js feature added by "wasm" flag above
 
 [profile.release]
 opt-level = "z"
