@@ -268,8 +268,8 @@ mod tests {
         rgb.extend_from_slice(&ciphertext);
         let mut rgba = vec![0u8; 1024 * 1024 * 4];
         for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
-            for c in 0..3 {
-                px[c] = rgb.get(i * 3 + c).copied().unwrap_or(0);
+            for (c, channel) in px[..3].iter_mut().enumerate() {
+                *channel = rgb.get(i * 3 + c).copied().unwrap_or(0);
             }
             px[3] = 255;
         }

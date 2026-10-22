@@ -2,15 +2,19 @@
 name = "docvault-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 # ─── Feature flags ────────────────────────────────────────────────────────────
-# "wasm" (default): enables wasm-bindgen exports for the browser/wasm-pack build
-# No features:      compiles as a plain Rust library for native use (docvault-cli)
+# "wasm":      enables wasm-bindgen exports for the browser build
+#              (wasm-pack build --target web --out-dir pkg -- --features wasm)
+# No features: plain Rust library for native use (docvault-cli). This must stay
+#              the default: Cargo unifies features across the workspace, so a
+#              default "wasm" would leak into the CLI build and break it.
 [features]
-default = ["wasm"]
+default = []
 wasm = [
     "dep:wasm-bindgen",
     "dep:js-sys",
@@ -32,6 +36,3 @@ ring      = { version = "0.17" }
 serde     = { version = "1", features = ["derive"] }
 getrandom = { version = "0.2" }   # js feature added by "wasm" flag above
 
-[profile.release]
-opt-level = "z"
-lto = true

@@ -1,3 +1,9 @@
 [workspace]
 members = ["crates/docvault-core", "crates/docvault-cli"]
 resolver = "2"
+
+# Profiles only take effect at the workspace root.
+# opt-level stays at the default 3: "z" makes PBKDF2/AES noticeably slower.
+[profile.release]
+lto = true
+codegen-units = 1

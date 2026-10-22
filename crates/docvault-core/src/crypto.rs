@@ -1,4 +1,4 @@
-use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
 use std::num::NonZeroU32;
