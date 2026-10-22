@@ -2,21 +2,26 @@ use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{path::Path, time::Duration};
 
-use crate::{avi, cli::{DecodeArgs, resolve_password, write_output}, pixel_io};
-use docvault_core::decoder::{decode, decode_multi};
+use crate::{avi, cli::{DecodeArgs, resolve_password, write_output}};
+use docvault_core::{crypto::AUTH_FAILED, decoder::{decode_png_frames, DecodeResult}};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run(args: DecodeArgs) -> Result<()> {
-    let password = resolve_password(args.password, "Decryption password: ", false)?;
-
     let input = &args.file;
     let output_dir = args.output.as_deref();
 
-    // Validate input exists
-    if !input.exists() {
+    // Validate input before prompting, so a typo doesn't cost a password entry
+    if !input.is_file() {
         anyhow::bail!("File not found: '{}'", input.display());
     }
+
+    let password = resolve_password(
+        args.password,
+        args.password_file.as_deref(),
+        "Decryption password: ",
+        false,
+    )?;
 
     let spinner = make_spinner();
     spinner.set_message(format!(
@@ -90,83 +95,40 @@ pub fn run(args: DecodeArgs) -> Result<()> {
 
 // ─── Format-specific decoders ─────────────────────────────────────────────────
 
-struct Decoded {
-    file_bytes: Vec<u8>,
-    filename:   String,
-}
-
-fn decode_png_vault(path: &Path, password: &str) -> Result<Decoded> {
+fn decode_png_vault(path: &Path, password: &str) -> Result<DecodeResult> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("Cannot read '{}'", path.display()))?;
     decode_png_bytes(&bytes, password)
 }
 
-fn decode_png_bytes(bytes: &[u8], password: &str) -> Result<Decoded> {
+fn decode_png_bytes(bytes: &[u8], password: &str) -> Result<DecodeResult> {
     if !is_png(bytes) {
         anyhow::bail!("File does not have a valid PNG signature");
     }
-
-    let (rgba, width, height) = pixel_io::decode_png_to_rgba(bytes)
-        .context("Failed to decode PNG pixel data")?;
-
-    let result = decode(&rgba, width, height, password)
-        .map_err(|e| {
-            if e.contains("Invalid password") || e.contains("corrupted") || e.contains("mac") {
-                anyhow::anyhow!("Wrong password or corrupted vault file")
-            } else {
-                anyhow::anyhow!("{e}")
-            }
-        })
-        .context("Decryption failed")?;
-
-    Ok(Decoded {
-        file_bytes: result.file_bytes,
-        filename:   result.filename,
-    })
+    decode_png_frames(&[bytes], password).map_err(decryption_error)
 }
 
-fn decode_avi_vault(path: &Path, password: &str) -> Result<Decoded> {
+fn decode_avi_vault(path: &Path, password: &str) -> Result<DecodeResult> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("Cannot read '{}'", path.display()))?;
     decode_avi_bytes(&bytes, password)
 }
 
-fn decode_avi_bytes(bytes: &[u8], password: &str) -> Result<Decoded> {
+fn decode_avi_bytes(bytes: &[u8], password: &str) -> Result<DecodeResult> {
     if !is_riff_avi(bytes) {
         anyhow::bail!("File does not have a valid RIFF/AVI signature");
     }
-
-    // Extract PNG frames from the AVI container
     let png_frames = avi::read_avi(bytes).context("Failed to parse AVI container")?;
-    let frame_count = png_frames.len() as u32;
+    decode_png_frames(&png_frames, password).map_err(decryption_error)
+}
 
-    // Decode each PNG frame to RGBA and concatenate into a flat buffer
-    let mut flat_rgba: Vec<u8> = Vec::new();
-    let mut frame_width = 1024u32;
-    let mut frame_height = 1024u32;
-
-    for (i, png) in png_frames.iter().enumerate() {
-        let (rgba, w, h) = pixel_io::decode_png_to_rgba(png)
-            .with_context(|| format!("Failed to decode PNG frame {i}"))?;
-        frame_width = w;
-        frame_height = h;
-        flat_rgba.extend_from_slice(&rgba);
+/// Map a core error to a user-facing one; authentication failures get a fixed message.
+fn decryption_error(e: String) -> anyhow::Error {
+    if e == AUTH_FAILED {
+        anyhow::anyhow!("Wrong password or corrupted vault file").context("Decryption failed")
+    } else {
+        anyhow::anyhow!("{e}").context("Decryption failed")
     }
-
-    let result = decode_multi(&flat_rgba, frame_count, frame_width, frame_height, password)
-        .map_err(|e| {
-            if e.contains("Invalid password") || e.contains("corrupted") || e.contains("mac") {
-                anyhow::anyhow!("Wrong password or corrupted vault file")
-            } else {
-                anyhow::anyhow!("{e}")
-            }
-        })
-        .context("Decryption failed")?;
-
-    Ok(Decoded {
-        file_bytes: result.file_bytes,
-        filename:   result.filename,
-    })
 }
 
 // ─── Magic byte detection ─────────────────────────────────────────────────────
