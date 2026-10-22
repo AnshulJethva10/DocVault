@@ -4,7 +4,6 @@ use clap::Parser;
 mod avi;
 mod cli;
 mod commands;
-mod pixel_io;
 
 use cli::{Cli, Commands};
 

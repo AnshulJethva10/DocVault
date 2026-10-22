@@ -19,16 +19,26 @@
 
 // ─── Muxer ───────────────────────────────────────────────────────────────────
 
+/// AVIF_HASINDEX: the file ends with an `idx1` chunk.
+const AVIF_HASINDEX: u32 = 0x10;
+/// AVIIF_KEYFRAME: every MPNG frame is independently decodable.
+const AVIIF_KEYFRAME: u32 = 0x10;
+const IDX1_ENTRY: usize = 16;
+
 /// Build a valid AVI file from a slice of PNG frame byte buffers.
 ///
 /// The output is byte-for-byte identical to what `createAviFromPngFrames` in
 /// `aviMuxer.ts` produces, so files created here can be decoded by the web
-/// app and vice versa.
-pub fn write_avi(frames: &[Vec<u8>], width: u32, height: u32) -> Vec<u8> {
-    assert!(!frames.is_empty(), "Cannot create AVI with no frames");
+/// app and vice versa. An `idx1` index is written so media players that rely
+/// on it (the header advertises AVIF_HASINDEX) can seek and count frames.
+pub fn write_avi(frames: &[Vec<u8>], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    if frames.is_empty() {
+        anyhow::bail!("Cannot create AVI with no frames");
+    }
+    const TOO_BIG: &str = "Vault is too large for an AVI file (4 GiB limit)";
 
     let fps: u32 = 1;
-    let frame_count = frames.len();
+    let frame_count = u32::try_from(frames.len()).map_err(|_| anyhow::anyhow!(TOO_BIG))?;
     let max_frame_size = frames.iter().map(|f| f.len()).max().unwrap_or(0);
 
     // ── Size calculations (must match TypeScript exactly) ──────────────
@@ -49,25 +59,29 @@ pub fn write_avi(frames: &[Vec<u8>], width: u32, height: u32) -> Vec<u8> {
     let hdrl_total = 8 + hdrl_content;
 
     // LIST 'movi': "movi"(4) + frame chunks (each = 8 + data [+ 1 pad if odd])
-    let mut movi_frame_data: usize = 0;
-    for frame in frames {
-        movi_frame_data += 8 + frame.len();
-        if frame.len() % 2 != 0 {
-            movi_frame_data += 1;
-        }
-    }
+    let movi_frame_data = frames
+        .iter()
+        .try_fold(0usize, |acc, f| acc.checked_add(8 + f.len() + f.len() % 2))
+        .ok_or_else(|| anyhow::anyhow!(TOO_BIG))?;
     let movi_content = 4 + movi_frame_data;
     let movi_total = 8 + movi_content;
 
-    // RIFF: "AVI "(4) + hdrl + movi
-    let riff_content = 4 + hdrl_total + movi_total;
+    // idx1: one 16-byte entry per frame
+    let idx1_content = IDX1_ENTRY * frames.len();
+    let idx1_total = 8 + idx1_content;
+
+    // RIFF: "AVI "(4) + hdrl + movi + idx1
+    let riff_content = 4 + hdrl_total + movi_total + idx1_total;
+    if u32::try_from(riff_content).is_err() {
+        anyhow::bail!(TOO_BIG);
+    }
     let total_size = 8 + riff_content;
 
     let mut b = Vec::with_capacity(total_size);
 
-    // ── Write helpers (all cast to the correct integer type at write time) ─
+    // ── Write helpers (sizes were checked against u32 above) ───────────
     macro_rules! fcc   { ($s:expr)  => { b.extend_from_slice($s) } }
-    macro_rules! u32le { ($v:expr)  => { b.extend_from_slice(&u32::try_from($v).expect("value fits u32").to_le_bytes()) } }
+    macro_rules! u32le { ($v:expr)  => { b.extend_from_slice(&($v as u32).to_le_bytes()) } }
     macro_rules! i32le { ($v:expr)  => { b.extend_from_slice(&($v as i32).to_le_bytes()) } }
     macro_rules! u16le { ($v:expr)  => { b.extend_from_slice(&($v as u16).to_le_bytes()) } }
     macro_rules! i16le { ($v:expr)  => { b.extend_from_slice(&($v as i16).to_le_bytes()) } }
@@ -83,8 +97,8 @@ pub fn write_avi(frames: &[Vec<u8>], width: u32, height: u32) -> Vec<u8> {
     u32le!(1_000_000u32 / fps);    // dwMicroSecPerFrame
     u32le!(0u32);                   // dwMaxBytesPerSec
     u32le!(0u32);                   // dwPaddingGranularity
-    u32le!(0x10u32);                // dwFlags (AVIF_HASINDEX)
-    u32le!(frame_count as u32);     // dwTotalFrames
+    u32le!(AVIF_HASINDEX);          // dwFlags
+    u32le!(frame_count);            // dwTotalFrames
     u32le!(0u32);                   // dwInitialFrames
     u32le!(1u32);                   // dwStreams
     u32le!(max_frame_size);         // dwSuggestedBufferSize
@@ -106,7 +120,7 @@ pub fn write_avi(frames: &[Vec<u8>], width: u32, height: u32) -> Vec<u8> {
     u32le!(1u32);               // dwScale
     u32le!(fps);                // dwRate
     u32le!(0u32);               // dwStart
-    u32le!(frame_count as u32); // dwLength
+    u32le!(frame_count);        // dwLength
     u32le!(max_frame_size);     // dwSuggestedBufferSize
     u32le!(0xFFFF_FFFFu32);     // dwQuality (-1)
     u32le!(0u32);               // dwSampleSize
@@ -132,24 +146,49 @@ pub fn write_avi(frames: &[Vec<u8>], width: u32, height: u32) -> Vec<u8> {
 
     for frame in frames {
         fcc!(b"00dc");
-        u32le!(frame.len() as u32);
+        u32le!(frame.len());
         b.extend_from_slice(frame);
         // RIFF word-alignment padding
-        if frame.len() % 2 != 0 {
+        if !frame.len().is_multiple_of(2) {
             b.push(0x00);
         }
     }
 
-    b
+    // ── idx1 (offsets are relative to the 'movi' FourCC) ───────────────
+    fcc!(b"idx1"); u32le!(idx1_content);
+    let mut offset = 4usize;
+    for frame in frames {
+        fcc!(b"00dc");
+        u32le!(AVIIF_KEYFRAME);
+        u32le!(offset);
+        u32le!(frame.len());
+        offset += 8 + frame.len() + frame.len() % 2;
+    }
+
+    debug_assert_eq!(b.len(), total_size);
+    Ok(b)
 }
 
 // ─── Parser ──────────────────────────────────────────────────────────────────
 
+/// Read a RIFF chunk header at `pos`: (FourCC, size, data start).
+fn chunk_header(data: &[u8], pos: usize) -> Option<(&[u8], usize, usize)> {
+    let id = data.get(pos..pos.checked_add(4)?)?;
+    let size = u32::from_le_bytes(data.get(pos + 4..pos + 8)?.try_into().ok()?) as usize;
+    Some((id, size, pos + 8))
+}
+
+/// Offset just past a chunk's data, including the RIFF word-alignment pad byte.
+fn chunk_end(start: usize, size: usize) -> Option<usize> {
+    start.checked_add(size)?.checked_add(size % 2)
+}
+
 /// Extract PNG frame buffers from a DocVault `.vault.avi` file.
 ///
 /// Parses the RIFF/AVI structure, locates the `movi` LIST, and returns all
-/// `00dc` video frame chunks as raw PNG byte vectors.
-pub fn read_avi(data: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+/// `00dc` video frame chunks as slices into `data` (no copies). Every size
+/// field is untrusted, so all offsets are bounds- and overflow-checked.
+pub fn read_avi(data: &[u8]) -> anyhow::Result<Vec<&[u8]>> {
     if data.len() < 12 {
         anyhow::bail!("File too small to be a valid RIFF/AVI");
     }
@@ -160,65 +199,36 @@ pub fn read_avi(data: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
     if &data[8..12] != b"AVI " {
         anyhow::bail!("Not a valid AVI file (missing AVI  FourCC)");
     }
+    let corrupt = || anyhow::anyhow!("AVI structure is corrupted (chunk sizes run past the end of the file)");
 
     let mut pos = 12usize; // skip RIFF id (4) + RIFF size (4) + "AVI "(4)
-    let mut png_frames: Vec<Vec<u8>> = Vec::new();
+    let mut png_frames: Vec<&[u8]> = Vec::new();
 
-    while pos + 8 <= data.len() {
-        let chunk_id = &data[pos..pos + 4];
-        pos += 4;
-        let chunk_size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
+    while let Some((chunk_id, chunk_size, body)) = chunk_header(data, pos) {
+        if chunk_id == b"LIST" && data.get(body..body + 4) == Some(b"movi") {
+            // chunk_size covers "movi"(4) + all frame chunks
+            let movi_end = body.checked_add(chunk_size).ok_or_else(corrupt)?.min(data.len());
+            pos = body + 4; // skip "movi" FourCC
 
-        if chunk_id == b"LIST" {
-            if pos + 4 > data.len() {
-                break;
-            }
-            let list_type = &data[pos..pos + 4];
-
-            if list_type == b"movi" {
-                // chunk_size covers "movi"(4) + all frame chunks
-                let movi_end = pos + chunk_size;
-                pos += 4; // skip "movi" FourCC
-
-                while pos + 8 <= movi_end.min(data.len()) {
-                    let frame_id = &data[pos..pos + 4];
-                    pos += 4;
-                    let frame_size =
-                        u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-                    pos += 4;
-
-                    if frame_id == b"00dc" {
-                        if pos + frame_size > data.len() {
-                            anyhow::bail!(
-                                "AVI frame data truncated at offset {pos} \
-                                 (need {frame_size} bytes, have {})",
-                                data.len() - pos
-                            );
-                        }
-                        png_frames.push(data[pos..pos + frame_size].to_vec());
-                    }
-
-                    pos += frame_size;
-                    if frame_size % 2 != 0 {
-                        pos += 1; // word-alignment padding
-                    }
+            while pos + 8 <= movi_end {
+                let (frame_id, frame_size, frame_start) = chunk_header(data, pos).ok_or_else(corrupt)?;
+                let frame_end = frame_start.checked_add(frame_size).ok_or_else(corrupt)?;
+                if frame_id == b"00dc" {
+                    let frame = data.get(frame_start..frame_end).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "AVI frame data truncated at offset {frame_start} \
+                             (need {frame_size} bytes, have {})",
+                            data.len() - frame_start
+                        )
+                    })?;
+                    png_frames.push(frame);
                 }
-                break; // found movi — no need to scan further
-            } else {
-                // Skip this LIST (hdrl, INFO, etc.)
-                pos += chunk_size; // chunk_size covers list_type + content
-                if chunk_size % 2 != 0 {
-                    pos += 1;
-                }
+                pos = chunk_end(frame_start, frame_size).ok_or_else(corrupt)?;
             }
-        } else {
-            // Skip non-LIST chunk (idx1, JUNK, etc.)
-            pos += chunk_size;
-            if chunk_size % 2 != 0 {
-                pos += 1;
-            }
+            break; // found movi — no need to scan further
         }
+        // Skip any other chunk or LIST (hdrl, INFO, idx1, JUNK, ...)
+        pos = chunk_end(body, chunk_size).ok_or_else(corrupt)?;
     }
 
     if png_frames.is_empty() {
@@ -249,7 +259,7 @@ mod tests {
     #[test]
     fn single_frame_roundtrip() {
         let frame = dummy_png(42);
-        let avi = write_avi(&[frame.clone()], 1, 1);
+        let avi = write_avi(std::slice::from_ref(&frame), 1, 1).unwrap();
 
         // Must start with RIFF
         assert_eq!(&avi[0..4], b"RIFF");
@@ -263,12 +273,12 @@ mod tests {
     #[test]
     fn multi_frame_roundtrip() {
         let frames: Vec<Vec<u8>> = (0..5).map(|i| dummy_png(i * 50)).collect();
-        let avi = write_avi(&frames, 1, 1);
+        let avi = write_avi(&frames, 1, 1).unwrap();
         let frames_out = read_avi(&avi).expect("read_avi failed");
 
         assert_eq!(frames_out.len(), 5);
         for (i, (orig, decoded)) in frames.iter().zip(frames_out.iter()).enumerate() {
-            assert_eq!(orig, decoded, "frame {i} differs");
+            assert_eq!(orig.as_slice(), *decoded, "frame {i} differs");
         }
     }
 
@@ -276,7 +286,7 @@ mod tests {
     fn odd_frame_size_gets_padding() {
         // A 1-byte "frame" (odd size) must be padded to word-align
         let weird_frame = vec![0xFFu8];
-        let avi = write_avi(&[weird_frame.clone()], 1, 1);
+        let avi = write_avi(std::slice::from_ref(&weird_frame), 1, 1).unwrap();
         // After "00dc" + size(1) + data(1) there should be a 0x00 pad byte
         // The parser should still reconstruct the exact original bytes
         let frames_out = read_avi(&avi).expect("read_avi failed");
@@ -297,5 +307,31 @@ mod tests {
         let result = read_avi(&fake);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("AVI"));
+    }
+
+    #[test]
+    fn writes_an_idx1_index() {
+        let frames = vec![dummy_png(1), vec![0xAA; 3]];
+        let avi = write_avi(&frames, 1, 1).unwrap();
+        let idx = avi.windows(4).rposition(|w| w == b"idx1").expect("idx1 chunk");
+        assert_eq!(u32::from_le_bytes(avi[idx + 4..idx + 8].try_into().unwrap()), 32);
+        // Second entry's offset = 4 ("movi") + 8 + len(frame 0) + pad
+        let second = u32::from_le_bytes(avi[idx + 8 + 16 + 8..idx + 8 + 16 + 12].try_into().unwrap());
+        assert_eq!(second as usize, 4 + 8 + frames[0].len() + frames[0].len() % 2);
+        assert_eq!(read_avi(&avi).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn huge_chunk_sizes_do_not_panic() {
+        let mut avi = write_avi(&[dummy_png(9)], 1, 1).unwrap();
+        // Corrupt the hdrl LIST size to u32::MAX
+        avi[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_avi(&avi).is_err());
+
+        let mut avi = write_avi(&[dummy_png(9)], 1, 1).unwrap();
+        let movi = avi.windows(4).position(|w| w == b"movi").unwrap();
+        // Corrupt the first frame's size
+        avi[movi + 8..movi + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_avi(&avi).is_err());
     }
 }

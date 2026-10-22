@@ -95,7 +95,7 @@ cd docvault
 
 # 2. Build the Rust core → WebAssembly
 cd crates/docvault-core
-wasm-pack build --target web --out-dir pkg
+wasm-pack build --target web --out-dir pkg -- --features wasm
 
 # 3. Install frontend dependencies
 cd ../../web

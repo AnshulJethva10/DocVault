@@ -6,13 +6,24 @@ use std::{
     time::Duration,
 };
 
-use crate::{avi, cli::{EncodeArgs, resolve_password, write_output}, pixel_io};
-use docvault_core::encoder::encode_multi;
+use crate::{avi, cli::{EncodeArgs, resolve_password, write_output}};
+use docvault_core::encoder::{encode_png_frames, FRAME_HEIGHT, FRAME_WIDTH};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run(args: EncodeArgs) -> Result<()> {
-    let password = resolve_password(args.password, "Encryption password: ", true)?;
+    // Catch typos in paths before asking for (and confirming) a password
+    for file in &args.files {
+        if !file.is_file() {
+            anyhow::bail!("File not found: '{}'", file.display());
+        }
+    }
+    let password = resolve_password(
+        args.password,
+        args.password_file.as_deref(),
+        "Encryption password: ",
+        true,
+    )?;
     let output_dir = args.output.as_deref();
     let jobs = plan_outputs(&args.files, output_dir);
 
@@ -174,24 +185,14 @@ fn run_encode(
         .first_or_octet_stream()
         .to_string();
 
-    // Encrypt + pack into RGBA frames
-    let encoded = encode_multi(&file_bytes, &filename, &mime, password)
+    // Encrypt + pack into lossless PNG frames
+    let frame_pngs = encode_png_frames(&file_bytes, &filename, &mime, password)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("Failed to encrypt '{filename}'"))?;
+    drop(file_bytes);
 
-    // Convert each RGBA frame → PNG bytes
     if let Some(pb) = pb {
-        pb.set_message(format!("Writing {} frame(s)…", encoded.frame_count));
-    }
-
-    let mut frame_pngs: Vec<Vec<u8>> = Vec::with_capacity(encoded.frame_count as usize);
-    for i in 0..encoded.frame_count {
-        let rgba = encoded
-            .get_frame_rgba(i)
-            .ok_or_else(|| anyhow::anyhow!("Frame {i} missing from encode result"))?;
-        let png = pixel_io::encode_frame_to_png(rgba, encoded.width, encoded.height)
-            .with_context(|| format!("Failed to encode frame {i} as PNG"))?;
-        frame_pngs.push(png);
+        pb.set_message(format!("Writing {} frame(s)…", frame_pngs.len()));
     }
 
     // Determine output path
@@ -208,7 +209,7 @@ fn run_encode(
 
     // Write output file
     if is_video {
-        let avi_bytes = avi::write_avi(&frame_pngs, encoded.width, encoded.height);
+        let avi_bytes = avi::write_avi(&frame_pngs, FRAME_WIDTH, FRAME_HEIGHT)?;
         write_output(&out_path, &avi_bytes, force)?;
     } else {
         write_output(&out_path, &frame_pngs[0], force)?;

@@ -73,7 +73,7 @@
   h4,
   h5,
   h6 {
-    font-family: 'Syne', sans-serif;
+    font-family: 'Syne Variable', 'Syne', sans-serif;
   }
 }
 
@@ -130,7 +130,7 @@
   }
 
   .header__title {
-    font-family: 'Syne', sans-serif;
+    font-family: 'Syne Variable', 'Syne', sans-serif;
     font-weight: 800;
     font-size: 22px;
     letter-spacing: -0.02em;
@@ -260,7 +260,7 @@
   }
 
   .card__heading {
-    font-family: 'Syne', sans-serif;
+    font-family: 'Syne Variable', 'Syne', sans-serif;
     font-weight: 700;
     font-size: 16px;
     color: var(--text-primary);

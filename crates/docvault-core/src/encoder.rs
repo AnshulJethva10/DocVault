@@ -2,15 +2,17 @@
 use wasm_bindgen::prelude::*;
 
 use crate::crypto;
-use crate::metadata::{VaultMetadata, METADATA_SIZE};
+use crate::metadata::{self, VaultMetadata, METADATA_SIZE, PBKDF2_ITERATIONS};
 
 /// Fixed canvas dimensions for encoded frames.
-const FRAME_WIDTH: u32 = 1024;
-const FRAME_HEIGHT: u32 = 1024;
+pub const FRAME_WIDTH: u32 = 1024;
+pub const FRAME_HEIGHT: u32 = 1024;
 /// Total pixels per frame.
-const PIXELS_PER_FRAME: usize = (FRAME_WIDTH * FRAME_HEIGHT) as usize;
+pub const PIXELS_PER_FRAME: usize = (FRAME_WIDTH * FRAME_HEIGHT) as usize;
 /// Total RGB bytes per frame (3 bytes per pixel).
-const BYTES_PER_FRAME: usize = PIXELS_PER_FRAME * 3;
+pub const BYTES_PER_FRAME: usize = PIXELS_PER_FRAME * 3;
+
+const TOO_LARGE: &str = "File is too large to encode";
 
 // ─── EncodeResult ─────────────────────────────────────────────────────────────
 
@@ -96,20 +98,80 @@ impl MultiFrameEncodeResult {
     }
 }
 
+// ─── PngEncodeResult (WASM) ───────────────────────────────────────────────────
+
+/// Encoded vault as one lossless PNG per frame, ready to save or mux into AVI.
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct PngEncodeResult {
+    frames: Vec<Vec<u8>>,
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl PngEncodeResult {
+    #[wasm_bindgen(getter)]
+    pub fn frame_count(&self) -> u32 {
+        self.frames.len() as u32
+    }
+
+    /// PNG file bytes for frame `index` (0-indexed).
+    pub fn get_frame_png(&self, index: u32) -> Result<js_sys::Uint8Array, JsValue> {
+        self.frames
+            .get(index as usize)
+            .map(|f| js_sys::Uint8Array::from(&f[..]))
+            .ok_or_else(|| JsValue::from_str(&format!("Frame index {index} out of range")))
+    }
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Convert a slice of RGB bytes into a full 1024×1024 RGBA pixel buffer.
-/// Pads with black (0, 0, 0, 255) if data is shorter than a full frame.
-fn rgb_to_rgba_frame(rgb_data: &[u8]) -> Vec<u8> {
-    let mut rgba = vec![0u8; PIXELS_PER_FRAME * 4];
-    for i in 0..PIXELS_PER_FRAME {
-        let byte_offset = i * 3;
-        let pixel_offset = i * 4;
+/// Encrypt a file into the vault's packed RGB stream, padded with zeros to a
+/// whole number of frames. Returns the stream and its frame count.
+///
+/// Layout: `VaultMetadata` (276 bytes, authenticated as AAD) ‖ AES-GCM
+/// ciphertext of (inner header ‖ file) ‖ 16-byte tag ‖ zero padding.
+///
+/// Everything happens in one buffer allocated at its final size, so peak
+/// memory is the input plus one copy rather than several.
+fn seal(file_bytes: &[u8], filename: &str, mime_type: &str, password: &str) -> Result<(Vec<u8>, u16), String> {
+    let inner = metadata::inner_header(filename, mime_type);
+    let payload_len = inner.len().checked_add(file_bytes.len()).ok_or(TOO_LARGE)?;
+    let used = METADATA_SIZE
+        .checked_add(payload_len)
+        .and_then(|n| n.checked_add(crypto::TAG_LEN))
+        .ok_or(TOO_LARGE)?;
+    // The frame count is part of the authenticated header, so fix it before encrypting
+    let frame_count = u16::try_from(used.div_ceil(BYTES_PER_FRAME))
+        .map_err(|_| format!("{TOO_LARGE}: a vault holds at most {} frames", u16::MAX))?;
+    let total_len = (frame_count as usize).checked_mul(BYTES_PER_FRAME).ok_or(TOO_LARGE)?;
 
-        rgba[pixel_offset]     = if byte_offset     < rgb_data.len() { rgb_data[byte_offset]     } else { 0 };
-        rgba[pixel_offset + 1] = if byte_offset + 1 < rgb_data.len() { rgb_data[byte_offset + 1] } else { 0 };
-        rgba[pixel_offset + 2] = if byte_offset + 2 < rgb_data.len() { rgb_data[byte_offset + 2] } else { 0 };
-        rgba[pixel_offset + 3] = 255; // alpha = opaque
+    let salt: [u8; 32] = crypto::generate_random_bytes(32)
+        .try_into()
+        .map_err(|_| "Failed to generate salt")?;
+    let iv: [u8; 12] = crypto::generate_random_bytes(12)
+        .try_into()
+        .map_err(|_| "Failed to generate IV")?;
+    let key = crypto::derive_key(password.as_bytes(), &salt, PBKDF2_ITERATIONS)?;
+
+    let header = VaultMetadata::new_v3(payload_len as u64, salt, iv, frame_count, PBKDF2_ITERATIONS);
+
+    let mut buf = Vec::with_capacity(total_len);
+    buf.extend_from_slice(&header.to_bytes());
+    buf.extend_from_slice(&inner);
+    buf.extend_from_slice(file_bytes);
+    let (aad, payload) = buf.split_at_mut(METADATA_SIZE);
+    let tag = crypto::encrypt_in_place(payload, &key, &iv, aad)?;
+    buf.extend_from_slice(&tag);
+    buf.resize(total_len, 0);
+    Ok((buf, frame_count))
+}
+
+/// Expand packed RGB into opaque RGBA.
+fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
+    for p in rgb.chunks_exact(3) {
+        rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
     }
     rgba
 }
@@ -118,71 +180,42 @@ fn rgb_to_rgba_frame(rgb_data: &[u8]) -> Vec<u8> {
 
 /// Encode a file into one or more 1024×1024 RGBA frames.
 ///
-/// Layout:
-/// - Frame 0: First `METADATA_SIZE` bytes = `VaultMetadata`, followed by ciphertext
-/// - Frame 1..N: Continuation of ciphertext
-/// - All frames are exactly 1024×1024 pixels, zero-padded to fill RGB triplets
+/// - Frame 0: first `METADATA_SIZE` bytes = `VaultMetadata`, followed by ciphertext
+/// - Frame 1..N: continuation of ciphertext
+/// - All frames are exactly 1024×1024 pixels; the last is zero-padded
 pub fn encode_multi(
     file_bytes: &[u8],
     filename: &str,
     mime_type: &str,
     password: &str,
 ) -> Result<MultiFrameEncodeResult, String> {
-    let salt: [u8; 32] = crypto::generate_random_bytes(32)
-        .try_into()
-        .map_err(|_| "Failed to generate salt")?;
-    let iv: [u8; 12] = crypto::generate_random_bytes(12)
-        .try_into()
-        .map_err(|_| "Failed to generate IV")?;
-
-    let key = crypto::derive_key(password.as_bytes(), &salt)?;
-
-    // AES-256-GCM ciphertext = plaintext + 16-byte tag, so the frame count is
-    // known before encrypting — the metadata must be final before it is used as AAD.
-    let total_data_len = METADATA_SIZE + file_bytes.len() + 16;
-    let frame_count = ((total_data_len as f64) / (BYTES_PER_FRAME as f64)).ceil() as u16;
-
-    let metadata = VaultMetadata::new_with_frames(
-        filename,
-        mime_type,
-        file_bytes.len() as u64,
-        salt,
-        iv,
-        frame_count,
-    );
-    let metadata_bytes = metadata.to_bytes();
-    debug_assert_eq!(metadata_bytes.len(), METADATA_SIZE);
-
-    // Authenticate the metadata header so it cannot be altered undetected
-    let ciphertext = crypto::encrypt(file_bytes, &key, &iv, &metadata_bytes)?;
-    debug_assert_eq!(METADATA_SIZE + ciphertext.len(), total_data_len);
-
-    let mut all_bytes = Vec::with_capacity(total_data_len);
-    all_bytes.extend_from_slice(&metadata_bytes);
-    all_bytes.extend_from_slice(&ciphertext);
-
-    // Pad to a multiple of 3 for RGB triplet alignment
-    while all_bytes.len() % 3 != 0 {
-        all_bytes.push(0x00);
-    }
-
-    let mut frames_data = Vec::with_capacity(frame_count as usize * PIXELS_PER_FRAME * 4);
-    for i in 0..frame_count as usize {
-        let start = i * BYTES_PER_FRAME;
-        let end = (start + BYTES_PER_FRAME).min(all_bytes.len());
-        let chunk = if start < all_bytes.len() { &all_bytes[start..end] } else { &[] };
-        frames_data.extend_from_slice(&rgb_to_rgba_frame(chunk));
-    }
-
+    let (rgb, frame_count) = seal(file_bytes, filename, mime_type, password)?;
     Ok(MultiFrameEncodeResult {
-        frames_data,
+        frames_data: rgb_to_rgba(&rgb),
         frame_count: frame_count as u32,
         width: FRAME_WIDTH,
         height: FRAME_HEIGHT,
     })
 }
 
-/// Single-frame encode — convenience wrapper over `encode_multi`.
+/// Encode a file into lossless RGB PNGs, one per frame.
+///
+/// This is the preferred path for every front end: it never routes pixels
+/// through a browser canvas, which privacy modes are allowed to alter.
+pub fn encode_png_frames(
+    file_bytes: &[u8],
+    filename: &str,
+    mime_type: &str,
+    password: &str,
+) -> Result<Vec<Vec<u8>>, String> {
+    let (rgb, _) = seal(file_bytes, filename, mime_type, password)?;
+    rgb.chunks_exact(BYTES_PER_FRAME)
+        .map(|frame| crate::png::encode_rgb(frame, FRAME_WIDTH, FRAME_HEIGHT))
+        .collect()
+}
+
+/// Single-frame encode. Fails if the file needs more than one frame —
+/// returning only the first frame would silently lose the rest of the file.
 pub fn encode(
     file_bytes: &[u8],
     filename: &str,
@@ -190,14 +223,32 @@ pub fn encode(
     password: &str,
 ) -> Result<EncodeResult, String> {
     let multi = encode_multi(file_bytes, filename, mime_type, password)?;
-    let frame_size = PIXELS_PER_FRAME * 4;
-    let rgba_pixels = multi.frames_data[..frame_size].to_vec();
-    Ok(EncodeResult { rgba_pixels, width: multi.width, height: multi.height })
+    if multi.frame_count != 1 {
+        return Err(format!(
+            "File needs {} frames and cannot fit in a single image; use multi-frame encoding",
+            multi.frame_count
+        ));
+    }
+    Ok(EncodeResult { rgba_pixels: multi.frames_data, width: multi.width, height: multi.height })
 }
 
 // ─── WASM-exported wrappers ───────────────────────────────────────────────────
 
-/// WASM export: multi-frame encode.
+/// WASM export: encode straight to PNG frames (no canvas involved).
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn encode_file_png(
+    file_bytes: &[u8],
+    filename: &str,
+    mime_type: &str,
+    password: &str,
+) -> Result<PngEncodeResult, JsValue> {
+    encode_png_frames(file_bytes, filename, mime_type, password)
+        .map(|frames| PngEncodeResult { frames })
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// WASM export: multi-frame encode to raw RGBA.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn encode_file_multi(
@@ -255,5 +306,30 @@ mod tests {
         let frame = result.get_frame_rgba(0).expect("frame 0 should exist");
         assert_eq!(frame.len(), 1024 * 1024 * 4);
         assert!(result.get_frame_rgba(result.frame_count).is_none());
+    }
+
+    #[test]
+    fn single_frame_encode_refuses_multi_frame_files() {
+        let data = vec![0u8; 4 * 1024 * 1024];
+        let err = encode(&data, "big.bin", "application/octet-stream", "pw").err().unwrap();
+        assert!(err.contains("frames"), "{err}");
+    }
+
+    #[test]
+    fn frame_boundary_sizes_get_the_right_frame_count() {
+        // inner header for "f" + "x/y" is 2 + 1 + 1 + 3 = 7 bytes
+        let fits = BYTES_PER_FRAME - METADATA_SIZE - crypto::TAG_LEN - 7;
+        let one = encode_multi(&vec![1u8; fits], "f", "x/y", "pw").unwrap();
+        assert_eq!(one.frame_count, 1);
+        let two = encode_multi(&vec![1u8; fits + 1], "f", "x/y", "pw").unwrap();
+        assert_eq!(two.frame_count, 2);
+    }
+
+    #[test]
+    fn header_does_not_reveal_filename() {
+        let r = encode_multi(b"x", "Payroll_2026.xlsx", "application/vnd.ms-excel", "pw").unwrap();
+        let rgb: Vec<u8> = r.frames_data.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let needle = b"Payroll";
+        assert!(!rgb.windows(needle.len()).any(|w| w == needle));
     }
 }

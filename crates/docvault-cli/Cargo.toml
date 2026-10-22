@@ -1,7 +1,8 @@
 [package]
 name = "docvault-cli"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2021"
+rust-version = "1.88"
 description = "DocVault CLI — encrypt and disguise files from the terminal"
 
 [[bin]]
@@ -18,9 +19,6 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # Error handling
 anyhow = "1.0"
 
-# PNG image I/O
-image = { version = "0.25", default-features = false, features = ["png"] }
-
 # Terminal progress bars
 indicatif = "0.17"
 
@@ -29,6 +27,9 @@ mime_guess = "2.0"
 
 # Interactive hidden password prompt
 rpassword = "7"
+
+# Atomic output writes (temp file + rename)
+tempfile = "3"
 
 [dev-dependencies]
 tempfile    = "3"

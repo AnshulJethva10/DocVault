@@ -24,16 +24,16 @@ function getStrengthLevel(password: string): number {
     if (/[^a-zA-Z0-9]/.test(password)) score++;
 
     if (score <= 2) return 1; // Weak
-    if (score <= 4) return 2; // Fair
-    if (score >= 5) return 4; // Strong (shows 4 bars)
-    return Math.min(score, 4);
+    if (score === 3) return 2; // Fair
+    if (score === 4) return 3; // Good
+    return 4; // Strong
 }
 
 const STRENGTH_COLORS = {
     0: 'var(--border-default)',
     1: 'var(--error)',    // Weak
     2: 'var(--warning)',  // Fair
-    3: 'var(--warning)',  // Fair (3 bars)
+    3: 'var(--success)',  // Good
     4: 'var(--success)'   // Strong
 };
 
@@ -41,7 +41,7 @@ const STRENGTH_LABELS = {
     0: '',
     1: 'Weak',
     2: 'Fair',
-    3: 'Fair',
+    3: 'Good',
     4: 'Strong'
 };
 

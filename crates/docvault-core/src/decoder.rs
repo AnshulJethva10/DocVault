@@ -2,7 +2,13 @@
 use wasm_bindgen::prelude::*;
 
 use crate::crypto;
-use crate::metadata::{VaultMetadata, METADATA_SIZE, MIN_SUPPORTED_VERSION, VERSION};
+use crate::encoder::{BYTES_PER_FRAME, FRAME_HEIGHT, FRAME_WIDTH, PIXELS_PER_FRAME};
+use crate::metadata::{
+    self, VaultMetadata, MAX_PBKDF2_ITERATIONS, METADATA_SIZE, MIN_PBKDF2_ITERATIONS,
+    MIN_SUPPORTED_VERSION, VERSION,
+};
+
+const TRUNCATED: &str = "Image data truncated: not enough bytes for ciphertext";
 
 // ─── DecodeResult ─────────────────────────────────────────────────────────────
 
@@ -44,72 +50,112 @@ pub struct DecodeResult {
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Extract RGB bytes from a single RGBA frame (discards the alpha channel).
-fn extract_rgb_from_rgba(rgba_pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixel_count = (width * height) as usize;
-    let expected_rgba_len = pixel_count * 4;
+/// Reject frames that are not the fixed vault size before touching their pixels.
+fn check_dimensions(width: u32, height: u32) -> Result<(), String> {
+    if (width, height) != (FRAME_WIDTH, FRAME_HEIGHT) {
+        return Err(format!(
+            "Image is {width}×{height}, but DocVault frames are {FRAME_WIDTH}×{FRAME_HEIGHT} \
+             (was it resized or re-compressed by another app?)"
+        ));
+    }
+    Ok(())
+}
 
+/// Extract packed RGB from `frame_count` concatenated RGBA frames (alpha discarded).
+fn extract_rgb_from_rgba(rgba_pixels: &[u8], frame_count: usize) -> Result<Vec<u8>, String> {
+    let expected_rgba_len = frame_count
+        .checked_mul(PIXELS_PER_FRAME * 4)
+        .ok_or("Too many frames")?;
     if rgba_pixels.len() < expected_rgba_len {
         return Err(format!(
-            "Pixel data too short: expected {} bytes, got {}",
+            "Pixel data too short: expected {} bytes for {} frame(s), got {}",
             expected_rgba_len,
+            frame_count,
             rgba_pixels.len()
         ));
     }
-
-    let mut rgb_bytes = Vec::with_capacity(pixel_count * 3);
-    for i in 0..pixel_count {
-        let offset = i * 4;
-        rgb_bytes.push(rgba_pixels[offset]);     // R
-        rgb_bytes.push(rgba_pixels[offset + 1]); // G
-        rgb_bytes.push(rgba_pixels[offset + 2]); // B
+    let mut rgb = Vec::with_capacity(frame_count * BYTES_PER_FRAME);
+    for p in rgba_pixels[..expected_rgba_len].chunks_exact(4) {
+        rgb.extend_from_slice(&p[..3]);
     }
-    Ok(rgb_bytes)
+    Ok(rgb)
 }
 
-/// Core decode from concatenated RGB bytes (shared by single and multi-frame paths).
-fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, String> {
-    if rgb_bytes.len() < METADATA_SIZE {
-        return Err("Image too small to contain DocVault metadata".to_string());
-    }
-
-    let metadata = VaultMetadata::from_bytes(&rgb_bytes[..METADATA_SIZE])?;
-
+/// Header checks that need no password: magic and supported version.
+fn check_header(metadata: &VaultMetadata) -> Result<(), String> {
     if !metadata.validate_magic() {
         return Err("Not a DocVault encoded image (invalid magic bytes)".to_string());
     }
-
-    if metadata.version < MIN_SUPPORTED_VERSION || metadata.version > VERSION {
+    if metadata.version > VERSION {
+        return Err(format!(
+            "This vault was created by a newer version of DocVault (format v{}); \
+             please update DocVault to open it",
+            metadata.version
+        ));
+    }
+    if metadata.version < MIN_SUPPORTED_VERSION {
         return Err(format!("Unsupported DocVault format version: {}", metadata.version));
     }
+    Ok(())
+}
 
-    // v2+ authenticates the raw header bytes; v1 files predate that and use no AAD
-    let aad: &[u8] = if metadata.version >= 2 { &rgb_bytes[..METADATA_SIZE] } else { &[] };
+/// Core decode from the concatenated RGB of every frame.
+///
+/// Every header field is validated *before* the (deliberately slow) key
+/// derivation, and all arithmetic on header values is checked: the header is
+/// attacker-controlled until the GCM tag has been verified. Decryption runs in
+/// place and the plaintext is shifted to the front of `rgb`, so no second
+/// copy of the file is made.
+fn open_vault(mut rgb: Vec<u8>, frames_supplied: usize, password: &str) -> Result<DecodeResult, String> {
+    if rgb.len() < METADATA_SIZE {
+        return Err("Image too small to contain DocVault metadata".to_string());
+    }
+    let metadata = VaultMetadata::from_bytes(&rgb[..METADATA_SIZE])?;
+    check_header(&metadata)?;
 
-    let key = crypto::derive_key(password.as_bytes(), &metadata.salt)?;
+    let expected_frames = metadata.total_frames as usize;
+    if expected_frames != frames_supplied {
+        return Err(format!(
+            "This vault has {expected_frames} frame(s) but {frames_supplied} were provided; \
+             make sure the complete vault file is loaded"
+        ));
+    }
+
+    let iterations = metadata.iterations();
+    if !(MIN_PBKDF2_ITERATIONS..=MAX_PBKDF2_ITERATIONS).contains(&iterations) {
+        return Err("Corrupted vault: invalid key-derivation settings".to_string());
+    }
 
     // AES-256-GCM ciphertext = plaintext + 16-byte GCM tag
-    let ciphertext_len = metadata.file_size as usize + 16;
-    let ciphertext_start = METADATA_SIZE;
-    let ciphertext_end = ciphertext_start + ciphertext_len;
-
-    if rgb_bytes.len() < ciphertext_end {
-        return Err("Image data truncated: not enough bytes for ciphertext".to_string());
+    let ciphertext_len = usize::try_from(metadata.file_size)
+        .ok()
+        .and_then(|n| n.checked_add(crypto::TAG_LEN))
+        .ok_or(TRUNCATED)?;
+    let ciphertext_end = METADATA_SIZE.checked_add(ciphertext_len).ok_or(TRUNCATED)?;
+    if rgb.len() < ciphertext_end {
+        return Err(TRUNCATED.to_string());
     }
 
-    let ciphertext = &rgb_bytes[ciphertext_start..ciphertext_end];
-    let plaintext = crypto::decrypt(ciphertext, &key, &metadata.iv, aad)?;
+    let key = crypto::derive_key(password.as_bytes(), &metadata.salt, iterations)?;
 
-    let file_size = metadata.file_size as usize;
-    if plaintext.len() < file_size {
-        return Err("Decrypted data shorter than expected file size".to_string());
-    }
+    let (header_bytes, body) = rgb.split_at_mut(METADATA_SIZE);
+    // v2+ authenticates the raw header bytes; v1 files predate that and use no AAD
+    let aad: &[u8] = if metadata.version >= 2 { header_bytes } else { &[] };
+    let plain_len = crypto::decrypt_in_place(&mut body[..ciphertext_len], &key, &metadata.iv, aad)?;
 
-    Ok(DecodeResult {
-        file_bytes: plaintext[..file_size].to_vec(),
-        filename:   metadata.safe_filename(),
-        mime_type:  metadata.mime_type_str(),
-    })
+    let (filename, mime_type, offset) = if metadata.version >= 3 {
+        let (name, mime, offset) = metadata::parse_inner_header(&body[..plain_len])?;
+        (metadata::sanitize_filename(&name), mime, offset)
+    } else {
+        (metadata.safe_filename(), metadata.mime_type_str(), 0)
+    };
+
+    let start = METADATA_SIZE + offset;
+    let end = METADATA_SIZE + plain_len;
+    rgb.copy_within(start..end, 0);
+    rgb.truncate(end - start);
+
+    Ok(DecodeResult { file_bytes: rgb, filename, mime_type })
 }
 
 // ─── Public pure-Rust API ─────────────────────────────────────────────────────
@@ -121,8 +167,9 @@ pub fn decode(
     height: u32,
     password: &str,
 ) -> Result<DecodeResult, String> {
-    let rgb_bytes = extract_rgb_from_rgba(rgba_pixels, width, height)?;
-    decode_from_rgb(&rgb_bytes, password)
+    check_dimensions(width, height)?;
+    let rgb = extract_rgb_from_rgba(rgba_pixels, 1)?;
+    open_vault(rgb, 1, password)
 }
 
 /// Decode a multi-frame vault video back to the original file.
@@ -136,25 +183,62 @@ pub fn decode_multi(
     height: u32,
     password: &str,
 ) -> Result<DecodeResult, String> {
-    let frame_rgba_size = (width * height * 4) as usize;
-    let expected_len = frame_count as usize * frame_rgba_size;
+    check_dimensions(width, height)?;
+    let rgb = extract_rgb_from_rgba(frames_rgba, frame_count as usize)?;
+    open_vault(rgb, frame_count as usize, password)
+}
 
-    if frames_rgba.len() < expected_len {
-        return Err(format!(
-            "Frame data too short: expected {} bytes for {} frames, got {}",
-            expected_len, frame_count, frames_rgba.len()
-        ));
+/// Incremental decoder fed one PNG frame at a time.
+///
+/// The first frame's header is checked as soon as it arrives, so a file that
+/// is not a vault (or is from a newer version) is rejected before the rest of
+/// a large video is decoded. Only packed RGB is kept, never RGBA.
+#[derive(Default)]
+pub struct PngVaultDecoder {
+    rgb: Vec<u8>,
+    frames: usize,
+    expected_frames: usize,
+}
+
+impl PngVaultDecoder {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    let mut all_rgb = Vec::new();
-    for i in 0..frame_count as usize {
-        let start = i * frame_rgba_size;
-        let end = start + frame_rgba_size;
-        let frame_rgb = extract_rgb_from_rgba(&frames_rgba[start..end], width, height)?;
-        all_rgb.extend_from_slice(&frame_rgb);
+    /// Decode one PNG frame and append its pixels.
+    pub fn push_frame(&mut self, png: &[u8]) -> Result<(), String> {
+        if self.frames > 0 && self.frames >= self.expected_frames {
+            return Err(format!("Too many frames: this vault has {}", self.expected_frames));
+        }
+        let frame = crate::png::decode_rgb(png, FRAME_WIDTH, FRAME_HEIGHT)?;
+        if self.frames == 0 {
+            let metadata = VaultMetadata::from_bytes(&frame[..METADATA_SIZE])?;
+            check_header(&metadata)?;
+            self.expected_frames = metadata.total_frames as usize;
+            self.rgb = Vec::with_capacity(self.expected_frames.saturating_mul(BYTES_PER_FRAME));
+        }
+        self.rgb.extend_from_slice(&frame);
+        self.frames += 1;
+        Ok(())
     }
 
-    decode_from_rgb(&all_rgb, password)
+    /// Verify the password and return the original file.
+    pub fn finish(&mut self, password: &str) -> Result<DecodeResult, String> {
+        if self.frames == 0 {
+            return Err("No frames were provided".to_string());
+        }
+        let frames = std::mem::take(&mut self.frames);
+        open_vault(std::mem::take(&mut self.rgb), frames, password)
+    }
+}
+
+/// Decode a vault from its PNG frames (one PNG per frame, in order).
+pub fn decode_png_frames<T: AsRef<[u8]>>(pngs: &[T], password: &str) -> Result<DecodeResult, String> {
+    let mut decoder = PngVaultDecoder::new();
+    for png in pngs {
+        decoder.push_frame(png.as_ref())?;
+    }
+    decoder.finish(password)
 }
 
 // ─── WASM-exported wrappers ───────────────────────────────────────────────────
@@ -186,6 +270,36 @@ pub fn decode_file_multi(
         .map_err(|e| JsValue::from_str(&e))
 }
 
+/// WASM export: decode PNG frames without a canvas.
+/// `new PngFrameDecoder()`, `push_frame(pngBytes)` per frame, then `finish(password)`.
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub struct PngFrameDecoder(PngVaultDecoder);
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+impl PngFrameDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self(PngVaultDecoder::new())
+    }
+
+    pub fn push_frame(&mut self, png: &[u8]) -> Result<(), JsValue> {
+        self.0.push_frame(png).map_err(|e| JsValue::from_str(&e))
+    }
+
+    pub fn finish(&mut self, password: &str) -> Result<DecodeResult, JsValue> {
+        self.0.finish(password).map_err(|e| JsValue::from_str(&e))
+    }
+}
+
+#[cfg(feature = "wasm")]
+impl Default for PngFrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(all(test, not(feature = "wasm")))]
@@ -199,6 +313,17 @@ mod tests {
         let frame_count = enc.frame_count;
         decode_multi(&enc.frames_data, frame_count, enc.width, enc.height, password)
             .expect("decode failed")
+    }
+
+    fn rgb_to_frame(rgb: &[u8]) -> Vec<u8> {
+        let mut rgba = vec![0u8; PIXELS_PER_FRAME * 4];
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            for (c, channel) in px[..3].iter_mut().enumerate() {
+                *channel = rgb.get(i * 3 + c).copied().unwrap_or(0);
+            }
+            px[3] = 255;
+        }
+        rgba
     }
 
     #[test]
@@ -217,31 +342,56 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_keeps_long_and_unicode_names() {
+        let long = format!("{}_FINAL_signed.pdf", "Quarterly_Board_Report_".repeat(5));
+        let docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        let enc = encoder::encode_multi(b"x", &long, docx, "pw").unwrap();
+        let r = decode_multi(&enc.frames_data, 1, 1024, 1024, "pw").unwrap();
+        assert_eq!(r.filename, long);
+        assert_eq!(r.mime_type, docx);
+
+        let deva = format!("{}.pdf", "दस्तावेज़".repeat(6));
+        let enc = encoder::encode_multi(b"x", &deva, "application/pdf", "pw").unwrap();
+        let r = decode_multi(&enc.frames_data, 1, 1024, 1024, "pw").unwrap();
+        assert_eq!(r.filename, deva);
+    }
+
+    #[test]
+    fn png_frames_round_trip() {
+        let original: Vec<u8> = (0..4_000_000).map(|i| (i * 7 % 256) as u8).collect();
+        let pngs = encoder::encode_png_frames(&original, "a.bin", "application/octet-stream", "pw").unwrap();
+        assert_eq!(pngs.len(), 2);
+        let r = decode_png_frames(&pngs, "pw").unwrap();
+        assert_eq!(r.file_bytes, original);
+        assert_eq!(r.filename, "a.bin");
+    }
+
+    #[test]
+    fn missing_frames_are_reported_clearly() {
+        let data = vec![1u8; 4 * 1024 * 1024];
+        let pngs = encoder::encode_png_frames(&data, "a.bin", "application/octet-stream", "pw").unwrap();
+        let err = decode_png_frames(&pngs[..1], "pw").unwrap_err();
+        assert!(err.contains("2 frame(s) but 1"), "{err}");
+    }
+
+    #[test]
     fn wrong_password_returns_error() {
         let data = b"Secret document contents";
         let enc = encoder::encode_multi(data, "doc.txt", "text/plain", "correct")
             .expect("encode failed");
         let err = decode_multi(&enc.frames_data, enc.frame_count, enc.width, enc.height, "wrong");
-        assert!(err.is_err(), "wrong password must return an error");
-        let msg = err.unwrap_err();
-        assert!(
-            msg.contains("Invalid password") || msg.contains("corrupted"),
-            "error message should mention invalid password, got: {msg}"
-        );
+        assert_eq!(err.unwrap_err(), crypto::AUTH_FAILED);
     }
 
-    /// Overwrite the stored filename inside an encoded frame, the way an
+    /// Overwrite a header byte range inside an encoded frame, the way an
     /// attacker would edit the PNG pixels without knowing the password.
-    fn tamper_filename(frames_rgba: &mut [u8], name: &str) {
+    fn tamper_header(frames_rgba: &mut [u8], offset: usize, bytes: &[u8]) {
         let mut rgb: Vec<u8> = frames_rgba
             .chunks_exact(4)
             .take(METADATA_SIZE / 3 + 1)
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
-        let off = 4 + 1 + 8 + 32 + 12;
-        let mut field = [0u8; 128];
-        field[..name.len()].copy_from_slice(name.as_bytes());
-        rgb[off..off + 128].copy_from_slice(&field);
+        rgb[offset..offset + bytes.len()].copy_from_slice(bytes);
         for (i, px) in rgb.chunks_exact(3).enumerate() {
             frames_rgba[i * 4..i * 4 + 3].copy_from_slice(px);
         }
@@ -251,43 +401,77 @@ mod tests {
     fn tampered_metadata_fails_authentication() {
         let mut enc = encoder::encode_multi(b"payload", "doc.txt", "text/plain", "pw")
             .expect("encode failed");
-        tamper_filename(&mut enc.frames_data, "../../evil.sh");
+        tamper_header(&mut enc.frames_data, 4 + 1 + 8 + 32 + 12, b"../../evil.sh");
         let err = decode_multi(&enc.frames_data, enc.frame_count, enc.width, enc.height, "pw");
         assert!(err.is_err(), "tampered header must not decrypt");
     }
 
-    /// Build a v1 (pre-AAD) vault frame by hand to check backward compatibility.
-    fn encode_v1(data: &[u8], filename: &str, password: &str) -> Vec<u8> {
+    #[test]
+    fn huge_file_size_is_rejected_without_panicking() {
+        let mut enc = encoder::encode_multi(b"payload", "doc.txt", "text/plain", "pw").unwrap();
+        tamper_header(&mut enc.frames_data, 5, &u64::MAX.to_le_bytes());
+        let err = decode(&enc.frames_data, 1024, 1024, "pw").unwrap_err();
+        assert!(err.contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn absurd_iteration_count_is_rejected_before_kdf() {
+        let mut enc = encoder::encode_multi(b"payload", "doc.txt", "text/plain", "pw").unwrap();
+        tamper_header(&mut enc.frames_data, METADATA_SIZE - 25, &u32::MAX.to_le_bytes());
+        let err = decode(&enc.frames_data, 1024, 1024, "pw").unwrap_err();
+        assert!(err.contains("key-derivation"), "{err}");
+    }
+
+    #[test]
+    fn newer_format_asks_user_to_update() {
+        let mut enc = encoder::encode_multi(b"payload", "doc.txt", "text/plain", "pw").unwrap();
+        tamper_header(&mut enc.frames_data, 4, &[VERSION + 1]);
+        let err = decode(&enc.frames_data, 1024, 1024, "pw").unwrap_err();
+        assert!(err.contains("newer version"), "{err}");
+    }
+
+    #[test]
+    fn wrong_dimensions_are_rejected() {
+        let err = decode(&[0u8; 16], 2, 2, "pw").unwrap_err();
+        assert!(err.contains("2×2"), "{err}");
+    }
+
+    /// Build a legacy vault frame by hand to check backward compatibility.
+    fn encode_legacy(version: u8, data: &[u8], filename: &str, password: &str) -> Vec<u8> {
         let salt = [7u8; 32];
         let iv = [9u8; 12];
-        let key = crypto::derive_key(password.as_bytes(), &salt).unwrap();
-        let ciphertext = crypto::encrypt(data, &key, &iv, &[]).unwrap();
         let mut meta = VaultMetadata::new(filename, "text/plain", data.len() as u64, salt, iv);
-        meta.version = 1;
-        let mut rgb = meta.to_bytes();
+        meta.version = version;
+        let header = meta.to_bytes();
+        let aad: &[u8] = if version >= 2 { &header } else { &[] };
+        let key = crypto::derive_key(password.as_bytes(), &salt, crypto::LEGACY_PBKDF2_ITERATIONS).unwrap();
+        let ciphertext = crypto::encrypt(data, &key, &iv, aad).unwrap();
+        let mut rgb = header.clone();
         rgb.extend_from_slice(&ciphertext);
-        let mut rgba = vec![0u8; 1024 * 1024 * 4];
-        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
-            for c in 0..3 {
-                px[c] = rgb.get(i * 3 + c).copied().unwrap_or(0);
-            }
-            px[3] = 255;
-        }
-        rgba
+        rgb_to_frame(&rgb)
     }
 
     #[test]
     fn v1_files_still_decode() {
-        let rgba = encode_v1(b"legacy contents", "old.txt", "pw");
+        let rgba = encode_legacy(1, b"legacy contents", "old.txt", "pw");
         let result = decode(&rgba, 1024, 1024, "pw").expect("v1 decode failed");
         assert_eq!(result.file_bytes, b"legacy contents");
         assert_eq!(result.filename, "old.txt");
     }
 
     #[test]
+    fn v2_files_still_decode() {
+        let rgba = encode_legacy(2, b"v2 contents", "v2.txt", "pw");
+        let result = decode(&rgba, 1024, 1024, "pw").expect("v2 decode failed");
+        assert_eq!(result.file_bytes, b"v2 contents");
+        assert_eq!(result.filename, "v2.txt");
+        assert_eq!(result.mime_type, "text/plain");
+    }
+
+    #[test]
     fn v1_traversal_filename_is_sanitized() {
         // v1 headers are unauthenticated, so the filename must be cleaned on decode
-        let rgba = encode_v1(b"x", "../../.bashrc", "pw");
+        let rgba = encode_legacy(1, b"x", "../../.bashrc", "pw");
         let result = decode(&rgba, 1024, 1024, "pw").expect("v1 decode failed");
         assert_eq!(result.filename, ".bashrc");
     }

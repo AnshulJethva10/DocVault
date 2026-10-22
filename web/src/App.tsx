@@ -9,6 +9,14 @@ import { ProgressBar } from './components/ProgressBar';
 import { ImagePreview } from './components/ImagePreview';
 import { StatusMessage } from './components/StatusMessage';
 import { Lock, Unlock } from 'lucide-react';
+import { version as APP_VERSION } from '../package.json';
+
+/** Shortest password accepted for new vaults. */
+const MIN_PASSWORD_LENGTH = 8;
+/** Keep object URLs alive long enough for the browser to start the download. */
+const REVOKE_DELAY_MS = 60_000;
+/** Gap between downloads so browsers don't drop all but the first. */
+const DOWNLOAD_STAGGER_MS = 400;
 
 function triggerDownload(blob: Blob, filename: string) {
     const url = URL.createObjectURL(blob);
@@ -18,7 +26,8 @@ function triggerDownload(blob: Blob, filename: string) {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // Revoking immediately can cancel the download in Firefox and Safari
+    setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
 }
 
 export default function App() {
@@ -70,14 +79,14 @@ export default function App() {
     const handleDownloadAll = useCallback(() => {
         batchFiles
             .filter((f) => f.status === 'done' && f.outputBlob && f.outputFilename)
-            .forEach((f) => {
-                triggerDownload(f.outputBlob!, f.outputFilename!);
+            .forEach((f, i) => {
+                setTimeout(() => triggerDownload(f.outputBlob!, f.outputFilename!), i * DOWNLOAD_STAGGER_MS);
             });
     }, [batchFiles]);
 
     const handleBatchEncode = useCallback(async () => {
         if (batchFiles.length === 0) return;
-        if (!password) {
+        if (password.length < MIN_PASSWORD_LENGTH) {
             setPasswordError(true);
             return;
         }
@@ -153,7 +162,7 @@ export default function App() {
                     </div>
                 </div>
                 <div className="header__badge">
-                    <span className="header__badge-text">v1.0 · AES-256-GCM · WASM</span>
+                    <span className="header__badge-text">v{APP_VERSION} · AES-256-GCM · WASM</span>
                     <div className="header__badge-dot"></div>
                 </div>
             </header>
@@ -215,6 +224,7 @@ export default function App() {
                                     }}
                                     label="Encryption Password"
                                     error={passwordError}
+                                    errorMessage={`Use at least ${MIN_PASSWORD_LENGTH} characters`}
                                 />
                                 <PasswordInput
                                     id="password-confirm-input"
@@ -303,7 +313,7 @@ export default function App() {
             <footer className="footer">
                 <span className="footer-item">AES-256-GCM</span>
                 <span className="footer-dot">·</span>
-                <span className="footer-item">PBKDF2 × 310K</span>
+                <span className="footer-item">PBKDF2 × 600K</span>
                 <span className="footer-dot">·</span>
                 <span className="footer-item">RUST + WASM</span>
             </footer>

@@ -318,3 +318,95 @@ fn batch_encode_same_stem_keeps_both_files() {
     assert_eq!(fs::read(restore_dir.path().join("report.pdf")).unwrap(), b"pdf bytes");
     assert_eq!(fs::read(restore_dir.path().join("report.docx")).unwrap(), b"docx bytes");
 }
+
+// ─── Password file, permissions, atomic writes ───────────────────────────────
+
+#[test]
+fn password_file_round_trip_restores_owner_only_file() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("notes.txt");
+    let pw_file = dir.path().join("pw.txt");
+    fs::write(&input, b"private notes").unwrap();
+    fs::write(&pw_file, b"from-a-file\n").unwrap();
+
+    docvault()
+        .args(["encode", input.to_str().unwrap(), "--password-file", pw_file.to_str().unwrap()])
+        .env_remove("DOCVAULT_PASSWORD")
+        .assert()
+        .success();
+    fs::remove_file(&input).unwrap();
+
+    // The trailing newline must not be part of the password
+    docvault()
+        .args(["decode", dir.path().join("notes.vault.png").to_str().unwrap()])
+        .env("DOCVAULT_PASSWORD", "from-a-file")
+        .assert()
+        .success();
+    assert_eq!(fs::read(&input).unwrap(), b"private notes");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&input).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "restored plaintext must be owner-only");
+    }
+
+    // No temporary files are left next to the output
+    let leftovers: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+        .collect();
+    assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+}
+
+#[test]
+fn wrong_password_reports_exactly_that() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("s.txt");
+    fs::write(&input, b"x").unwrap();
+    docvault().args(["encode", input.to_str().unwrap()]).env("DOCVAULT_PASSWORD", "a").assert().success();
+    docvault()
+        .args(["decode", dir.path().join("s.vault.png").to_str().unwrap()])
+        .env("DOCVAULT_PASSWORD", "b")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Wrong password or corrupted vault file"));
+}
+
+#[test]
+fn missing_input_fails_before_asking_for_a_password() {
+    // No password source at all: if the CLI prompted first it would fail on the
+    // missing terminal instead of reporting the missing file.
+    docvault()
+        .args(["decode", "does-not-exist.vault.png"])
+        .env_remove("DOCVAULT_PASSWORD")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("File not found"));
+    docvault()
+        .args(["encode", "does-not-exist.pdf"])
+        .env_remove("DOCVAULT_PASSWORD")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("File not found"));
+}
+
+#[test]
+fn truncated_avi_reports_missing_frames() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("big.bin");
+    fs::write(&input, vec![7u8; 4_000_000]).unwrap();
+    docvault().args(["encode", input.to_str().unwrap()]).env("DOCVAULT_PASSWORD", "pw").assert().success();
+
+    let vault = dir.path().join("big.vault.avi");
+    let bytes = fs::read(&vault).unwrap();
+    // Cut the file in the middle of the second frame
+    fs::write(&vault, &bytes[..bytes.len() * 3 / 4]).unwrap();
+    docvault()
+        .args(["decode", vault.to_str().unwrap()])
+        .env("DOCVAULT_PASSWORD", "pw")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("truncated").or(predicate::str::contains("frame")));
+}
