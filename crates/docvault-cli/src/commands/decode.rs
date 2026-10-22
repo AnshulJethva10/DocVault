@@ -2,13 +2,13 @@ use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{path::Path, time::Duration};
 
-use crate::{avi, cli::{DecodeArgs, resolve_password}, pixel_io};
+use crate::{avi, cli::{DecodeArgs, resolve_password, write_output}, pixel_io};
 use docvault_core::decoder::{decode, decode_multi};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run(args: DecodeArgs) -> Result<()> {
-    let password = resolve_password(args.password, "Decryption password: ")?;
+    let password = resolve_password(args.password, "Decryption password: ", false)?;
 
     let input = &args.file;
     let output_dir = args.output.as_deref();
@@ -61,10 +61,20 @@ pub fn run(args: DecodeArgs) -> Result<()> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("Cannot create output directory '{}'", out_dir.display()))?;
 
-    let out_path = out_dir.join(&decode_result.filename);
+    // The core already sanitizes the stored name; re-check here so the output
+    // path can never leave `out_dir` even if that ever regresses.
+    let safe_name = Path::new(&decode_result.filename)
+        .file_name()
+        .filter(|n| *n == std::ffi::OsStr::new(&decode_result.filename))
+        .ok_or_else(|| {
+            anyhow::anyhow!("Refusing unsafe filename stored in vault: '{}'", decode_result.filename)
+        })?;
+    let out_path = out_dir.join(safe_name);
 
-    std::fs::write(&out_path, &decode_result.file_bytes)
-        .with_context(|| format!("Cannot write '{}'", out_path.display()))?;
+    if let Err(e) = write_output(&out_path, &decode_result.file_bytes, args.force) {
+        spinner.finish_and_clear();
+        return Err(e);
+    }
 
     let restored_size = decode_result.file_bytes.len() as u64;
 

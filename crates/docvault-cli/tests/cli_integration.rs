@@ -224,3 +224,97 @@ fn batch_encode_all_files_succeed() {
         );
     }
 }
+
+// ─── Overwrite protection ─────────────────────────────────────────────────────
+
+#[test]
+fn decode_refuses_to_overwrite_without_force() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("keep.txt");
+    fs::write(&input, b"original").unwrap();
+
+    docvault()
+        .args(["encode", input.to_str().unwrap()])
+        .env("DOCVAULT_PASSWORD", "pw")
+        .assert()
+        .success();
+
+    // Change the file on disk; decode must not clobber it
+    fs::write(&input, b"newer local edits").unwrap();
+    let vault = dir.path().join("keep.vault.png");
+
+    docvault()
+        .args(["decode", vault.to_str().unwrap()])
+        .env("DOCVAULT_PASSWORD", "pw")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+    assert_eq!(fs::read(&input).unwrap(), b"newer local edits");
+
+    docvault()
+        .args(["decode", vault.to_str().unwrap(), "--force"])
+        .env("DOCVAULT_PASSWORD", "pw")
+        .assert()
+        .success();
+    assert_eq!(fs::read(&input).unwrap(), b"original");
+}
+
+#[test]
+fn encode_refuses_to_overwrite_without_force() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("a.txt");
+    fs::write(&input, b"data").unwrap();
+    let vault = dir.path().join("a.vault.png");
+    fs::write(&vault, b"existing vault").unwrap();
+
+    docvault()
+        .args(["encode", input.to_str().unwrap()])
+        .env("DOCVAULT_PASSWORD", "pw")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+    assert_eq!(fs::read(&vault).unwrap(), b"existing vault");
+
+    docvault()
+        .args(["encode", input.to_str().unwrap(), "--force"])
+        .env("DOCVAULT_PASSWORD", "pw")
+        .assert()
+        .success();
+    assert_ne!(fs::read(&vault).unwrap(), b"existing vault");
+}
+
+// ─── Batch name collisions ────────────────────────────────────────────────────
+
+#[test]
+fn batch_encode_same_stem_keeps_both_files() {
+    let src_dir = TempDir::new().unwrap();
+    let out_dir = TempDir::new().unwrap();
+    let pdf = src_dir.path().join("report.pdf");
+    let docx = src_dir.path().join("report.docx");
+    fs::write(&pdf, b"pdf bytes").unwrap();
+    fs::write(&docx, b"docx bytes").unwrap();
+
+    docvault()
+        .args(["encode", pdf.to_str().unwrap(), docx.to_str().unwrap()])
+        .args(["--output", out_dir.path().to_str().unwrap()])
+        .env("DOCVAULT_PASSWORD", "pw")
+        .assert()
+        .success();
+
+    let first = out_dir.path().join("report.vault.png");
+    let second = out_dir.path().join("report (2).vault.png");
+    assert!(first.exists() && second.exists(), "both vaults must be written");
+
+    // Each vault restores its own original file
+    let restore_dir = TempDir::new().unwrap();
+    for vault in [&first, &second] {
+        docvault()
+            .args(["decode", vault.to_str().unwrap()])
+            .args(["--output", restore_dir.path().to_str().unwrap()])
+            .env("DOCVAULT_PASSWORD", "pw")
+            .assert()
+            .success();
+    }
+    assert_eq!(fs::read(restore_dir.path().join("report.pdf")).unwrap(), b"pdf bytes");
+    assert_eq!(fs::read(restore_dir.path().join("report.docx")).unwrap(), b"docx bytes");
+}

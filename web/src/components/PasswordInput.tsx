@@ -6,6 +6,11 @@ interface PasswordInputProps {
     onChange: (v: string) => void;
     label: string;
     error?: boolean;
+    /** Text shown under the field when `error` is set. */
+    errorMessage?: string;
+    placeholder?: string;
+    showStrength?: boolean;
+    id?: string;
 }
 
 function getStrengthLevel(password: string): number {
@@ -40,7 +45,16 @@ const STRENGTH_LABELS = {
     4: 'Strong'
 };
 
-export function PasswordInput({ value, onChange, error }: PasswordInputProps) {
+export function PasswordInput({
+    value,
+    onChange,
+    label: ariaLabel,
+    error,
+    errorMessage,
+    placeholder = 'enter passphrase...',
+    showStrength = true,
+    id = 'password-input',
+}: PasswordInputProps) {
     const [visible, setVisible] = useState(false);
     const [level, setLevel] = useState(0);
 
@@ -61,14 +75,16 @@ export function PasswordInput({ value, onChange, error }: PasswordInputProps) {
     const label = STRENGTH_LABELS[level as keyof typeof STRENGTH_LABELS];
 
     return (
-        <div className="password-input" id="password-input">
+        <div className="password-input" id={id}>
             <div className={`password-input__wrapper ${error ? 'password-input__wrapper--error' : ''}`}>
                 <input
                     type={visible ? 'text' : 'password'}
                     value={value}
                     onChange={(e) => onChange(e.target.value)}
                     className="password-input__field"
-                    placeholder="enter passphrase..."
+                    placeholder={placeholder}
+                    aria-label={ariaLabel}
+                    aria-invalid={error || undefined}
                     autoComplete="off"
                 />
                 <button
@@ -81,7 +97,13 @@ export function PasswordInput({ value, onChange, error }: PasswordInputProps) {
                 </button>
             </div>
 
-            <div className="strength">
+            {error && errorMessage && (
+                <span className="password-input__error" role="alert">
+                    {errorMessage}
+                </span>
+            )}
+
+            {showStrength && <div className="strength">
                 <div className="strength__bars">
                     {[0, 1, 2, 3].map((index) => {
                         const isFilled = index < level;
@@ -105,7 +127,7 @@ export function PasswordInput({ value, onChange, error }: PasswordInputProps) {
                         {label}
                     </span>
                 )}
-            </div>
+            </div>}
         </div>
     );
 }

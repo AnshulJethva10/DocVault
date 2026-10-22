@@ -44,7 +44,7 @@ ENCODE                              DECODE
                                       📄 document.pdf ✓
 ```
 
-Each 3 bytes of encrypted data map to one **RGB pixel**. All frames are fixed at **1024×1024 pixels**. Files that fit in a single frame (~≤3 MB) produce a PNG. Larger files are split across multiple frames and packaged into an **AVI video** using the lossless **MPNG (Motion PNG)** codec. DocVault embeds **metadata** including the `salt`, `IV`, `filename`, and `total_frames` in the first pixels.
+Each 3 bytes of encrypted data map to one **RGB pixel**. All frames are fixed at **1024×1024 pixels**. Files that fit in a single frame (~≤3 MB) produce a PNG. Larger files are split across multiple frames and packaged into an **AVI video** using the lossless **MPNG (Motion PNG)** codec. DocVault embeds **metadata** including the `salt`, `IV`, `filename`, and `total_frames` in the first pixels. Since format v2 this metadata header is authenticated by AES-GCM, so any change to it makes decryption fail.
 
 ## Features
 
@@ -65,7 +65,7 @@ Each 3 bytes of encrypted data map to one **RGB pixel**. All frames are fixed at
 ## Security
 
 ### Encryption
-DocVault encrypts your file using **AES-256-GCM**, an authenticated encryption mode. The authentication tag guarantees that nobody altered or corrupted the ciphertext. Providing a wrong password surfaces a clear authentication mismatch error. The engine never produces garbled output.
+DocVault encrypts your file using **AES-256-GCM**, an authenticated encryption mode. The authentication tag guarantees that nobody altered or corrupted the ciphertext — or, for format v2 files, the metadata header (filename, size, salt, IV, frame count), which is passed to AES-GCM as associated data. Format v1 files (created before this change) still decode, and the restored filename is always reduced to a plain name so a crafted vault can never write outside the chosen folder. Providing a wrong password surfaces a clear authentication mismatch error. The engine never produces garbled output.
 
 ### Key Derivation
 DocVault derives the encryption key using **PBKDF2-HMAC-SHA256** with `310,000` iterations. This high iteration count meets OWASP 2023 recommendations. It makes brute-force attacks computationally expensive. The engine generates a random 256-bit `salt` for every single file.
@@ -163,11 +163,11 @@ docvault/
 1. Open DocVault in your browser
 2. Click **Encode** tab
 3. Drag & drop or select one or more files (batch encoding supported)
-4. Enter a strong password
+4. Enter a strong password, then type it again in the confirm field
 5. Click **Encode & Download** (single file) or **Encode N Files** (batch)
 6. For small files (≤ ~3 MB): saves as `.vault.png`
 7. For larger files: saves as `.vault.avi` (playable in VLC)
-8. In batch mode, each file shows individual progress and a download button; click **Download All** when finished
+8. In batch mode, each file shows individual progress and a download button; click **Download All** when finished. Files that share a name (e.g. `report.pdf` and `report.docx`) are saved as `report.vault.png` and `report (2).vault.png`
 
 #### Decoding a File
 1. Open DocVault
@@ -196,6 +196,7 @@ DOCVAULT_PASSWORD="my secret" docvault encode report.pdf
 # Interactive hidden prompt (nothing shown, nothing logged)
 docvault encode report.pdf
 # Encryption password: ▌
+# Confirm password: ▌
 
 # Save to a specific output directory
 docvault encode report.pdf --output ~/vault/
@@ -211,6 +212,8 @@ docvault encode *.pdf --password "my secret" --output ~/vault/
 # ✔  3/3 files encoded successfully
 ```
 
+Inputs that would produce the same vault name (e.g. `report.pdf` and `report.docx`) get a numbered suffix: `report.vault.png`, `report (2).vault.png`.
+
 #### Decrypt a vault file
 
 ```bash
@@ -220,6 +223,8 @@ docvault decode report.vault.png --password "my secret"
 # Restore to a different directory
 docvault decode report.vault.avi --output ~/restored/
 ```
+
+> 🛡️ **No silent overwrites:** `encode` and `decode` refuse to replace a file that already exists. Pass `--force` (`-f`) to overwrite.
 
 > 📝 **Interoperability:** `.vault.png` and `.vault.avi` files produced by the CLI can be decoded by the web app, and vice versa. The format is identical.
 

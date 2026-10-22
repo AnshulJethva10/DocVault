@@ -27,6 +27,8 @@ export default function App() {
     const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
     const [password, setPassword] = useState('');
     const [passwordError, setPasswordError] = useState(false);
+    const [confirmPassword, setConfirmPassword] = useState('');
+    const [confirmError, setConfirmError] = useState(false);
     const { status, previewBlob, encodeFile, encodeBatch, decodeFile, reset } = useDocVault();
 
     const handleModeSwitch = useCallback(
@@ -36,6 +38,8 @@ export default function App() {
             setBatchFiles([]);
             setPassword('');
             setPasswordError(false);
+            setConfirmPassword('');
+            setConfirmError(false);
             reset();
         },
         [reset]
@@ -78,6 +82,12 @@ export default function App() {
             return;
         }
         setPasswordError(false);
+        // A typo here would make the vault unrecoverable, so require it twice
+        if (confirmPassword !== password) {
+            setConfirmError(true);
+            return;
+        }
+        setConfirmError(false);
 
         // If only one file, use single-file flow for auto-download + preview
         if (batchFiles.length === 1) {
@@ -111,7 +121,7 @@ export default function App() {
                 prev.map((f) => (f.id === fileId ? { ...f, ...patch } : f))
             );
         });
-    }, [batchFiles, password, encodeFile, encodeBatch]);
+    }, [batchFiles, password, confirmPassword, encodeFile, encodeBatch]);
 
     const handleDecode = useCallback(async () => {
         if (!file) return;
@@ -205,6 +215,19 @@ export default function App() {
                                     }}
                                     label="Encryption Password"
                                     error={passwordError}
+                                />
+                                <PasswordInput
+                                    id="password-confirm-input"
+                                    value={confirmPassword}
+                                    onChange={(v) => {
+                                        setConfirmPassword(v);
+                                        setConfirmError(false);
+                                    }}
+                                    label="Confirm Encryption Password"
+                                    placeholder="confirm passphrase..."
+                                    showStrength={false}
+                                    error={confirmError}
+                                    errorMessage="Passwords do not match"
                                 />
                             </div>
 

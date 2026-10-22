@@ -136,9 +136,10 @@ pub fn encode_multi(
         .map_err(|_| "Failed to generate IV")?;
 
     let key = crypto::derive_key(password.as_bytes(), &salt)?;
-    let ciphertext = crypto::encrypt(file_bytes, &key, &iv)?;
 
-    let total_data_len = METADATA_SIZE + ciphertext.len();
+    // AES-256-GCM ciphertext = plaintext + 16-byte tag, so the frame count is
+    // known before encrypting — the metadata must be final before it is used as AAD.
+    let total_data_len = METADATA_SIZE + file_bytes.len() + 16;
     let frame_count = ((total_data_len as f64) / (BYTES_PER_FRAME as f64)).ceil() as u16;
 
     let metadata = VaultMetadata::new_with_frames(
@@ -151,6 +152,10 @@ pub fn encode_multi(
     );
     let metadata_bytes = metadata.to_bytes();
     debug_assert_eq!(metadata_bytes.len(), METADATA_SIZE);
+
+    // Authenticate the metadata header so it cannot be altered undetected
+    let ciphertext = crypto::encrypt(file_bytes, &key, &iv, &metadata_bytes)?;
+    debug_assert_eq!(METADATA_SIZE + ciphertext.len(), total_data_len);
 
     let mut all_bytes = Vec::with_capacity(total_data_len);
     all_bytes.extend_from_slice(&metadata_bytes);

@@ -22,8 +22,9 @@ pub fn derive_key(password: &[u8], salt: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Encrypt plaintext using AES-256-GCM.
+/// `aad` is authenticated but not encrypted (used for the vault metadata header).
 /// Returns ciphertext with the 16-byte GCM authentication tag appended.
-pub fn encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String> {
+pub fn encrypt(plaintext: &[u8], key: &[u8], iv: &[u8], aad: &[u8]) -> Result<Vec<u8>, String> {
     let unbound_key = UnboundKey::new(&AES_256_GCM, key)
         .map_err(|e| format!("Failed to create AES key: {}", e))?;
     let less_safe_key = LessSafeKey::new(unbound_key);
@@ -34,15 +35,16 @@ pub fn encrypt(plaintext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Strin
     // ring encrypts in place and appends the tag
     let mut in_out = plaintext.to_vec();
     less_safe_key
-        .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+        .seal_in_place_append_tag(nonce, Aad::from(aad), &mut in_out)
         .map_err(|e| format!("Encryption failed: {}", e))?;
 
     Ok(in_out)
 }
 
 /// Decrypt ciphertext (with appended GCM tag) using AES-256-GCM.
+/// `aad` must match the bytes passed to `encrypt`, or authentication fails.
 /// Returns original plaintext on success.
-pub fn decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String> {
+pub fn decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8], aad: &[u8]) -> Result<Vec<u8>, String> {
     let unbound_key = UnboundKey::new(&AES_256_GCM, key)
         .map_err(|e| format!("Failed to create AES key: {}", e))?;
     let less_safe_key = LessSafeKey::new(unbound_key);
@@ -52,7 +54,7 @@ pub fn decrypt(ciphertext: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, Stri
 
     let mut in_out = ciphertext.to_vec();
     let plaintext = less_safe_key
-        .open_in_place(nonce, Aad::empty(), &mut in_out)
+        .open_in_place(nonce, Aad::from(aad), &mut in_out)
         .map_err(|_| "Invalid password or corrupted file".to_string())?;
 
     Ok(plaintext.to_vec())
