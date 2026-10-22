@@ -1,6 +1,6 @@
 [package]
 name = "docvault-core"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.88"
 
@@ -35,4 +35,5 @@ serde-wasm-bindgen    = { version = "0.6", optional = true }
 ring      = { version = "0.17" }
 serde     = { version = "1", features = ["derive"] }
 getrandom = { version = "0.2" }   # js feature added by "wasm" flag above
+png       = { version = "0.18" }  # lossless frame codec (no browser canvas)
 
