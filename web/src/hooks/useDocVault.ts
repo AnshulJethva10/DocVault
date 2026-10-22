@@ -200,6 +200,9 @@ export function useDocVault() {
 
       let successCount = 0;
       let errorCount = 0;
+      // Lower-cased output names already handed out in this batch, so
+      // "report.pdf" and "report.docx" don't both download as report.vault.png
+      const usedNames = new Set<string>();
 
       for (let i = 0; i < items.length; i++) {
         if (batchCancelledRef.current) break;
@@ -228,7 +231,11 @@ export function useDocVault() {
           );
 
           const ext = isVideo ? ".vault.avi" : ".vault.png";
-          const outputFilename = item.file.name.replace(/\.[^.]+$/, "") + ext;
+          const outputFilename = uniqueOutputName(
+            item.file.name.replace(/\.[^.]+$/, ""),
+            ext,
+            usedNames,
+          );
 
           onFileUpdate(item.id, {
             status: "done",
@@ -464,6 +471,20 @@ export function useDocVault() {
   }, []);
 
   return { status, previewBlob, encodeFile, encodeBatch, decodeFile, reset };
+}
+
+/** Return `${stem}${ext}`, or `${stem} (n)${ext}` if that name is already used. */
+function uniqueOutputName(
+  stem: string,
+  ext: string,
+  used: Set<string>,
+): string {
+  let name = stem + ext;
+  for (let n = 2; used.has(name.toLowerCase()); n++) {
+    name = `${stem} (${n})${ext}`;
+  }
+  used.add(name.toLowerCase());
+  return name;
 }
 
 /** Format byte sizes to human-readable strings. */

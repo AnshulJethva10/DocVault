@@ -45,6 +45,10 @@ pub struct EncodeArgs {
     /// Output directory for vault files (default: same directory as input).
     #[arg(short, long, value_name = "DIR")]
     pub output: Option<PathBuf>,
+
+    /// Overwrite vault files that already exist.
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -61,10 +65,21 @@ pub struct DecodeArgs {
     /// Output directory for the restored file (default: same directory as vault file).
     #[arg(short, long, value_name = "DIR")]
     pub output: Option<PathBuf>,
+
+    /// Overwrite the restored file if it already exists.
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 /// Resolve the password: use the provided value, or prompt interactively.
-pub fn resolve_password(provided: Option<String>, prompt: &str) -> anyhow::Result<String> {
+///
+/// With `confirm`, the interactive prompt asks twice so a typo cannot lock
+/// the user out of a freshly encoded file.
+pub fn resolve_password(
+    provided: Option<String>,
+    prompt: &str,
+    confirm: bool,
+) -> anyhow::Result<String> {
     match provided {
         Some(pw) if !pw.is_empty() => Ok(pw),
         _ => {
@@ -72,7 +87,37 @@ pub fn resolve_password(provided: Option<String>, prompt: &str) -> anyhow::Resul
             if pw.is_empty() {
                 anyhow::bail!("Password cannot be empty");
             }
+            if confirm {
+                let again = rpassword::prompt_password("Confirm password: ")?;
+                if again != pw {
+                    anyhow::bail!("Passwords do not match");
+                }
+            }
             Ok(pw)
         }
     }
+}
+
+/// Create `path` for writing, refusing to replace an existing file unless `force`.
+pub fn write_output(path: &std::path::Path, bytes: &[u8], force: bool) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::io::Write;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    if force {
+        opts.create(true).truncate(true);
+    } else {
+        // create_new fails atomically if the file exists — no check/write race
+        opts.create_new(true);
+    }
+    let mut file = opts.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::anyhow!("'{}' already exists (use --force to overwrite)", path.display())
+        } else {
+            anyhow::Error::new(e).context(format!("Cannot write '{}'", path.display()))
+        }
+    })?;
+    file.write_all(bytes)
+        .with_context(|| format!("Cannot write '{}'", path.display()))
 }

@@ -473,6 +473,14 @@
     box-shadow: 0 0 0 3px var(--accent-glow);
   }
 
+  .password-input__error {
+    display: block;
+    margin-top: 6px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--error);
+  }
+
   .password-input__wrapper--error .password-input__field {
     border-color: var(--error);
   }
@@ -1022,4 +1030,4 @@
     border-color: var(--accent);
     color: var(--accent);
   }
-}
+}

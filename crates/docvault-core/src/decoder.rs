@@ -2,7 +2,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::crypto;
-use crate::metadata::{VaultMetadata, METADATA_SIZE};
+use crate::metadata::{VaultMetadata, METADATA_SIZE, MIN_SUPPORTED_VERSION, VERSION};
 
 // ─── DecodeResult ─────────────────────────────────────────────────────────────
 
@@ -79,9 +79,12 @@ fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, Str
         return Err("Not a DocVault encoded image (invalid magic bytes)".to_string());
     }
 
-    if metadata.version != 1 {
+    if metadata.version < MIN_SUPPORTED_VERSION || metadata.version > VERSION {
         return Err(format!("Unsupported DocVault format version: {}", metadata.version));
     }
+
+    // v2+ authenticates the raw header bytes; v1 files predate that and use no AAD
+    let aad: &[u8] = if metadata.version >= 2 { &rgb_bytes[..METADATA_SIZE] } else { &[] };
 
     let key = crypto::derive_key(password.as_bytes(), &metadata.salt)?;
 
@@ -95,7 +98,7 @@ fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, Str
     }
 
     let ciphertext = &rgb_bytes[ciphertext_start..ciphertext_end];
-    let plaintext = crypto::decrypt(ciphertext, &key, &metadata.iv)?;
+    let plaintext = crypto::decrypt(ciphertext, &key, &metadata.iv, aad)?;
 
     let file_size = metadata.file_size as usize;
     if plaintext.len() < file_size {
@@ -104,7 +107,7 @@ fn decode_from_rgb(rgb_bytes: &[u8], password: &str) -> Result<DecodeResult, Str
 
     Ok(DecodeResult {
         file_bytes: plaintext[..file_size].to_vec(),
-        filename:   metadata.filename_str(),
+        filename:   metadata.safe_filename(),
         mime_type:  metadata.mime_type_str(),
     })
 }
@@ -225,6 +228,68 @@ mod tests {
             msg.contains("Invalid password") || msg.contains("corrupted"),
             "error message should mention invalid password, got: {msg}"
         );
+    }
+
+    /// Overwrite the stored filename inside an encoded frame, the way an
+    /// attacker would edit the PNG pixels without knowing the password.
+    fn tamper_filename(frames_rgba: &mut [u8], name: &str) {
+        let mut rgb: Vec<u8> = frames_rgba
+            .chunks_exact(4)
+            .take(METADATA_SIZE / 3 + 1)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        let off = 4 + 1 + 8 + 32 + 12;
+        let mut field = [0u8; 128];
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        rgb[off..off + 128].copy_from_slice(&field);
+        for (i, px) in rgb.chunks_exact(3).enumerate() {
+            frames_rgba[i * 4..i * 4 + 3].copy_from_slice(px);
+        }
+    }
+
+    #[test]
+    fn tampered_metadata_fails_authentication() {
+        let mut enc = encoder::encode_multi(b"payload", "doc.txt", "text/plain", "pw")
+            .expect("encode failed");
+        tamper_filename(&mut enc.frames_data, "../../evil.sh");
+        let err = decode_multi(&enc.frames_data, enc.frame_count, enc.width, enc.height, "pw");
+        assert!(err.is_err(), "tampered header must not decrypt");
+    }
+
+    /// Build a v1 (pre-AAD) vault frame by hand to check backward compatibility.
+    fn encode_v1(data: &[u8], filename: &str, password: &str) -> Vec<u8> {
+        let salt = [7u8; 32];
+        let iv = [9u8; 12];
+        let key = crypto::derive_key(password.as_bytes(), &salt).unwrap();
+        let ciphertext = crypto::encrypt(data, &key, &iv, &[]).unwrap();
+        let mut meta = VaultMetadata::new(filename, "text/plain", data.len() as u64, salt, iv);
+        meta.version = 1;
+        let mut rgb = meta.to_bytes();
+        rgb.extend_from_slice(&ciphertext);
+        let mut rgba = vec![0u8; 1024 * 1024 * 4];
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            for c in 0..3 {
+                px[c] = rgb.get(i * 3 + c).copied().unwrap_or(0);
+            }
+            px[3] = 255;
+        }
+        rgba
+    }
+
+    #[test]
+    fn v1_files_still_decode() {
+        let rgba = encode_v1(b"legacy contents", "old.txt", "pw");
+        let result = decode(&rgba, 1024, 1024, "pw").expect("v1 decode failed");
+        assert_eq!(result.file_bytes, b"legacy contents");
+        assert_eq!(result.filename, "old.txt");
+    }
+
+    #[test]
+    fn v1_traversal_filename_is_sanitized() {
+        // v1 headers are unauthenticated, so the filename must be cleaned on decode
+        let rgba = encode_v1(b"x", "../../.bashrc", "pw");
+        let result = decode(&rgba, 1024, 1024, "pw").expect("v1 decode failed");
+        assert_eq!(result.filename, ".bashrc");
     }
 
     #[test]

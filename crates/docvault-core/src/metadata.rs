@@ -5,8 +5,15 @@ pub const METADATA_SIZE: usize = 276;
 pub const METADATA_PIXELS: usize = 92;
 /// Magic bytes identifying a DocVault encoded image
 pub const MAGIC: [u8; 4] = *b"DCVT";
-/// Current format version
-pub const VERSION: u8 = 1;
+/// Current format version.
+/// v1: metadata header is NOT authenticated.
+/// v2: metadata header is passed to AES-GCM as associated data, so any
+///     tampering with filename, size, salt, etc. fails decryption.
+pub const VERSION: u8 = 2;
+/// Oldest format version the decoder still accepts.
+pub const MIN_SUPPORTED_VERSION: u8 = 1;
+/// Fallback name used when the stored filename is empty or unsafe.
+pub const FALLBACK_FILENAME: &str = "restored_file";
 
 #[derive(Debug, Clone)]
 pub struct VaultMetadata {
@@ -151,9 +158,74 @@ impl VaultMetadata {
         String::from_utf8_lossy(&self.filename[..end]).to_string()
     }
 
+    /// Filename reduced to a single safe path component.
+    ///
+    /// The stored filename comes from an untrusted file, so any directory
+    /// parts (`../`, `/abs/`, `C:\\`) are dropped and characters that are
+    /// invalid on common filesystems are replaced. Never returns a name that
+    /// could escape the output directory.
+    pub fn safe_filename(&self) -> String {
+        sanitize_filename(&self.filename_str())
+    }
+
     /// Extract MIME type as a trimmed UTF-8 string (null bytes removed)
     pub fn mime_type_str(&self) -> String {
         let end = self.mime_type.iter().position(|&b| b == 0).unwrap_or(64);
         String::from_utf8_lossy(&self.mime_type[..end]).to_string()
+    }
+}
+
+/// Reduce an untrusted filename to one safe path component.
+pub fn sanitize_filename(name: &str) -> String {
+    // Keep only the last component, treating both separators as path breaks
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .map(|c| match c {
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    // Windows silently drops trailing dots and spaces, so strip them up front
+    let trimmed = cleaned.trim_end_matches(['.', ' ']).trim_start_matches(' ');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        FALLBACK_FILENAME.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_keeps_plain_names() {
+        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
+        assert_eq!(sanitize_filename("my file (1).txt"), "my file (1).txt");
+    }
+
+    #[test]
+    fn sanitize_strips_directories() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_filename("/home/user/.bashrc"), ".bashrc");
+        assert_eq!(sanitize_filename("..\\..\\Windows\\evil.dll"), "evil.dll");
+        assert_eq!(sanitize_filename("C:\\evil.exe"), "evil.exe");
+    }
+
+    #[test]
+    fn sanitize_rejects_empty_and_dot_names() {
+        assert_eq!(sanitize_filename(""), FALLBACK_FILENAME);
+        assert_eq!(sanitize_filename(".."), FALLBACK_FILENAME);
+        assert_eq!(sanitize_filename("foo/.."), FALLBACK_FILENAME);
+        assert_eq!(sanitize_filename("dir/"), FALLBACK_FILENAME);
+        assert_eq!(sanitize_filename("..."), FALLBACK_FILENAME);
+    }
+
+    #[test]
+    fn sanitize_replaces_reserved_chars() {
+        assert_eq!(sanitize_filename("a:b*c?.txt"), "a_b_c_.txt");
+        assert_eq!(sanitize_filename("new\nline.txt"), "new_line.txt");
     }
 }
