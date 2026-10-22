@@ -1,124 +1,27 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type { Status, BatchFileItem } from "../types";
-import {
-  createAviFromPngFrames,
-  extractPngFramesFromAvi,
-} from "../utils/aviMuxer";
+import { CancelledError, VaultWorkerClient } from "../utils/vaultWorker";
 
-import init, {
-  encode_file_multi,
-  decode_file,
-  decode_file_multi,
-  get_version,
-} from "docvault-core";
-// @ts-ignore: Vite ?url import
-import wasmUrl from "docvault-core/docvault_core_bg.wasm?url";
-
-// Track initialization at the module level
-let wasmInitialized = false;
-
-/** Fixed frame dimensions matching the Rust encoder */
-const FRAME_WIDTH = 1024;
-const FRAME_HEIGHT = 1024;
+/** Pull a readable message out of whatever the worker or WASM threw. */
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string") return err;
+  return fallback;
+}
 
 export function useDocVault() {
   const [status, setStatus] = useState<Status>({ type: "idle" });
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const batchCancelledRef = useRef(false);
+  const clientRef = useRef<VaultWorkerClient | null>(null);
 
-  const loadWasm = useCallback(async () => {
-    if (!wasmInitialized) {
-      await init(wasmUrl);
-      wasmInitialized = true;
-    }
-    return { encode_file_multi, decode_file, decode_file_multi, get_version };
+  const client = useCallback((): VaultWorkerClient => {
+    clientRef.current ??= new VaultWorkerClient();
+    return clientRef.current;
   }, []);
 
-  /**
-   * Render a single RGBA frame onto a canvas and return it as a lossless PNG Blob.
-   */
-  const frameToPngBlob = async (
-    rgba: Uint8Array,
-    width: number,
-    height: number,
-  ): Promise<Blob> => {
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Failed to create canvas context");
-    const imageData = new ImageData(new Uint8ClampedArray(rgba), width, height);
-    ctx.putImageData(imageData, 0, 0);
-    return new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob((b) => {
-        if (b) resolve(b);
-        else reject(new Error("Failed to export PNG"));
-      }, "image/png");
-    });
-  };
-
-  /**
-   * Encode a single file into PNG or AVI — internal helper shared by
-   * encodeFile (single) and encodeBatch (multi).
-   * Does NOT set global status — caller is responsible for status updates.
-   */
-  const encodeOneFile = async (
-    file: File,
-    password: string,
-    onProgress?: (progress: number, message: string) => void,
-  ): Promise<{ blob: Blob; isVideo: boolean }> => {
-    const wasm = await loadWasm();
-
-    onProgress?.(20, "Reading file...");
-    const arrayBuffer = await file.arrayBuffer();
-    const fileBytes = new Uint8Array(arrayBuffer);
-
-    onProgress?.(40, "Encrypting & encoding...");
-    const result = wasm.encode_file_multi(
-      fileBytes,
-      file.name,
-      file.type || "application/octet-stream",
-      password,
-    );
-
-    try {
-      const frameCount = result.frame_count;
-      const width = result.width;
-      const height = result.height;
-
-      if (frameCount < 1) {
-        throw new Error("Encoder returned no frames");
-      }
-
-      if (frameCount === 1) {
-        onProgress?.(70, "Generating image...");
-        const rgba = result.get_frame(0);
-
-        onProgress?.(90, "Exporting PNG...");
-        const blob = await frameToPngBlob(rgba, width, height);
-        return { blob, isVideo: false };
-      }
-
-      onProgress?.(55, `Rendering ${frameCount} frames...`);
-
-      const pngBlobs: Blob[] = [];
-      for (let i = 0; i < frameCount; i++) {
-        onProgress?.(
-          55 + Math.floor((i / frameCount) * 30),
-          `Rendering frame ${i + 1} of ${frameCount}...`,
-        );
-        const rgba = result.get_frame(i);
-        const pngBlob = await frameToPngBlob(rgba, width, height);
-        pngBlobs.push(pngBlob);
-      }
-
-      onProgress?.(90, "Building AVI video...");
-      const aviBlob = await createAviFromPngFrames(pngBlobs, width, height, 1);
-      return { blob: aviBlob, isVideo: true };
-    } finally {
-      result.free();
-    }
-  };
+  // Stop any running job when the component unmounts
+  useEffect(() => () => clientRef.current?.cancel(), []);
 
   /**
    * Encode a file into either a single PNG (≤ 1 frame) or an AVI video
@@ -138,7 +41,7 @@ export function useDocVault() {
           progress: 10,
         });
 
-        const { blob, isVideo } = await encodeOneFile(
+        const { blob, isVideo } = await client().encode(
           file,
           password,
           (progress, message) => {
@@ -146,11 +49,7 @@ export function useDocVault() {
           },
         );
 
-        if (!isVideo) {
-          setPreviewBlob(blob);
-        } else {
-          setPreviewBlob(null);
-        }
+        setPreviewBlob(isVideo ? null : blob);
 
         const frameLabel = isVideo ? "AVI" : "PNG";
         setStatus({
@@ -158,22 +57,25 @@ export function useDocVault() {
           message: `Encoded successfully! (${formatSize(blob.size)} ${frameLabel})`,
         });
         return { blob, isVideo };
-      } catch (err: any) {
-        console.error("WASM Encode Error:", err);
-        const errMsg =
-          err?.message ||
-          (typeof err === "string" ? err : "Unknown error during encoding");
-        setStatus({ type: "error", message: `Encryption failed: ${errMsg}` });
+      } catch (err: unknown) {
+        if (err instanceof CancelledError) {
+          setStatus({ type: "idle" });
+        } else {
+          console.error("Encode error:", err);
+          const msg = errorMessage(err, "Unknown error during encoding");
+          setStatus({ type: "error", message: `Encryption failed: ${msg}` });
+        }
         throw err;
       }
     },
-    [loadWasm],
+    [client],
   );
 
   /**
    * Encode multiple files sequentially with the same password.
-   * Each file's progress is reported via `onFileUpdate` so the UI can
-   * render per-file status indicators.
+   * Files that are already done are skipped, so pressing the button again
+   * after adding files or after a failure only processes what is left.
+   * Each file's progress is reported via `onFileUpdate`.
    */
   const encodeBatch = useCallback(
     async (
@@ -183,46 +85,34 @@ export function useDocVault() {
     ): Promise<void> => {
       batchCancelledRef.current = false;
 
-      try {
-        setStatus({
-          type: "processing",
-          message: "Loading encryption engine...",
-          progress: 5,
-        });
-        await loadWasm();
-      } catch (err: any) {
-        setStatus({
-          type: "error",
-          message: "Failed to load encryption engine",
-        });
-        return;
-      }
-
-      let successCount = 0;
+      const todo = items.filter((item) => item.status !== "done");
+      let successCount = items.length - todo.length;
       let errorCount = 0;
       // Lower-cased output names already handed out in this batch, so
       // "report.pdf" and "report.docx" don't both download as report.vault.png
-      const usedNames = new Set<string>();
+      const usedNames = new Set<string>(
+        items.flatMap((item) => (item.outputFilename ? [item.outputFilename.toLowerCase()] : [])),
+      );
 
-      for (let i = 0; i < items.length; i++) {
+      for (let i = 0; i < todo.length; i++) {
         if (batchCancelledRef.current) break;
 
-        const item = items[i];
-        const overallProgress = Math.round((i / items.length) * 100);
+        const item = todo[i];
         setStatus({
           type: "processing",
-          message: `Encoding file ${i + 1} of ${items.length}: ${item.file.name}`,
-          progress: overallProgress,
+          message: `Encoding file ${i + 1} of ${todo.length}: ${item.file.name}`,
+          progress: Math.round((i / todo.length) * 100),
         });
 
         onFileUpdate(item.id, {
           status: "processing",
           progress: 10,
           message: "Starting...",
+          error: undefined,
         });
 
         try {
-          const { blob, isVideo } = await encodeOneFile(
+          const { blob, isVideo } = await client().encode(
             item.file,
             password,
             (progress, message) => {
@@ -246,15 +136,17 @@ export function useDocVault() {
             isVideo,
           });
           successCount++;
-        } catch (err: any) {
-          const errMsg =
-            err?.message ||
-            (typeof err === "string" ? String(err) : "Unknown error");
+        } catch (err: unknown) {
+          if (err instanceof CancelledError) {
+            onFileUpdate(item.id, { status: "pending", progress: 0, message: "" });
+            break;
+          }
+          const msg = errorMessage(err, "Unknown error");
           onFileUpdate(item.id, {
             status: "error",
             progress: 0,
-            message: errMsg,
-            error: errMsg,
+            message: msg,
+            error: msg,
           });
           errorCount++;
         }
@@ -273,62 +165,12 @@ export function useDocVault() {
         });
       }
     },
-    [loadWasm],
+    [client],
   );
 
   /**
-   * Extract RGBA pixel data from a single PNG image via canvas.
-   */
-  const extractPixelsFromImage = async (
-    file: File,
-  ): Promise<{ rgba: Uint8Array; width: number; height: number }> => {
-    const imageBitmap = await createImageBitmap(file);
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = imageBitmap.width;
-      canvas.height = imageBitmap.height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Failed to create canvas context");
-      ctx.drawImage(imageBitmap, 0, 0);
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      return {
-        rgba: new Uint8Array(imageData.data.buffer),
-        width: canvas.width,
-        height: canvas.height,
-      };
-    } finally {
-      imageBitmap.close();
-    }
-  };
-
-  /**
-   * Extract RGBA pixel data from a PNG Blob via canvas.
-   */
-  const extractPixelsFromPngBlob = async (
-    pngBlob: Blob,
-  ): Promise<{ rgba: Uint8Array; width: number; height: number }> => {
-    const bitmap = await createImageBitmap(pngBlob);
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Failed to create canvas context");
-      ctx.drawImage(bitmap, 0, 0);
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      return {
-        rgba: new Uint8Array(imageData.data.buffer),
-        width: canvas.width,
-        height: canvas.height,
-      };
-    } finally {
-      bitmap.close();
-    }
-  };
-
-  /**
    * Decode a DocVault encoded file back to the original.
-   * Supports both single-frame .vault.png and multi-frame .vault.avi files.
+   * The format (.vault.png or .vault.avi) is detected from the file's bytes.
    */
   const decodeFile = useCallback(
     async (
@@ -341,133 +183,35 @@ export function useDocVault() {
           message: "Loading decryption engine...",
           progress: 10,
         });
-        const wasm = await loadWasm();
-
-        const lowerName = file.name.toLowerCase();
-        const isAvi =
-          lowerName.endsWith(".vault.avi") ||
-          file.type === "video/avi" ||
-          file.type === "video/x-msvideo";
-
-        if (isAvi) {
-          // Multi-frame AVI decode
-          setStatus({
-            type: "processing",
-            message: "Parsing AVI video...",
-            progress: 15,
-          });
-          const pngFrames = await extractPngFramesFromAvi(file);
-          const frameCount = pngFrames.length;
-
-          if (frameCount === 0) {
-            throw new Error("AVI file did not contain any DocVault frames");
-          }
-
-          // Extract RGBA pixels from each PNG frame
-          const frameRgbaSize = FRAME_WIDTH * FRAME_HEIGHT * 4;
-          const allFramesRgba = new Uint8Array(frameCount * frameRgbaSize);
-
-          for (let i = 0; i < frameCount; i++) {
-            setStatus({
-              type: "processing",
-              message: `Extracting frame ${i + 1} of ${frameCount}...`,
-              progress: 20 + Math.floor((i / frameCount) * 30),
-            });
-            const { rgba, width, height } = await extractPixelsFromPngBlob(
-              pngFrames[i],
-            );
-            if (width !== FRAME_WIDTH || height !== FRAME_HEIGHT) {
-              throw new Error(
-                `Invalid AVI frame dimensions at frame ${i + 1}: expected ${FRAME_WIDTH}×${FRAME_HEIGHT}, got ${width}×${height}`,
-              );
-            }
-            allFramesRgba.set(rgba, i * frameRgbaSize);
-          }
-
-          setStatus({
-            type: "processing",
-            message: `Decrypting (${frameCount} frames)...`,
-            progress: 60,
-          });
-          const result = wasm.decode_file_multi(
-            allFramesRgba,
-            frameCount,
-            FRAME_WIDTH,
-            FRAME_HEIGHT,
-            password,
-          );
-
-          try {
-            setStatus({
-              type: "processing",
-              message: "Restoring file...",
-              progress: 80,
-            });
-            const fileBytesCopy = result.file_bytes.slice();
-            const filename = result.filename;
-            const mimeType = result.mime_type;
-
-            const fileBlob = new Blob([fileBytesCopy], {
-              type: mimeType || "application/octet-stream",
-            });
-
-            setStatus({ type: "success", message: `✅ Restored: ${filename}` });
-            return { blob: fileBlob, filename };
-          } finally {
-            result.free();
-          }
+        const { blob, filename } = await client().decode(
+          file,
+          password,
+          (progress, message) => {
+            setStatus({ type: "processing", message, progress });
+          },
+        );
+        setStatus({ type: "success", message: `✅ Restored: ${filename}` });
+        return { blob, filename };
+      } catch (err: unknown) {
+        if (err instanceof CancelledError) {
+          setStatus({ type: "idle" });
         } else {
-          // Single-frame PNG decode
-          setStatus({
-            type: "processing",
-            message: "Reading image...",
-            progress: 20,
-          });
-          const { rgba, width, height } = await extractPixelsFromImage(file);
-
-          setStatus({
-            type: "processing",
-            message: "Decrypting & decoding...",
-            progress: 50,
-          });
-          const result = wasm.decode_file(rgba, width, height, password);
-
-          try {
-            setStatus({
-              type: "processing",
-              message: "Restoring file...",
-              progress: 80,
-            });
-            const fileBytesCopy = result.file_bytes.slice();
-            const filename = result.filename;
-            const mimeType = result.mime_type;
-
-            const fileBlob = new Blob([fileBytesCopy], {
-              type: mimeType || "application/octet-stream",
-            });
-
-            setStatus({ type: "success", message: `✅ Restored: ${filename}` });
-            return { blob: fileBlob, filename };
-          } finally {
-            result.free();
-          }
+          console.error("Decode error:", err);
+          const msg = errorMessage(err, "Unknown error during decoding");
+          setStatus({ type: "error", message: `Decryption failed: ${msg}` });
         }
-      } catch (err: any) {
-        console.error("WASM Decode Error:", err);
-        const errMsg =
-          err?.message ||
-          (typeof err === "string" ? err : "Unknown error during decoding");
-        setStatus({ type: "error", message: `Decryption failed: ${errMsg}` });
         throw err;
       }
     },
-    [loadWasm],
+    [client],
   );
 
+  /** Stop any running job and clear status. */
   const reset = useCallback(() => {
+    batchCancelledRef.current = true;
+    clientRef.current?.cancel();
     setStatus({ type: "idle" });
     setPreviewBlob(null);
-    batchCancelledRef.current = true;
   }, []);
 
   return { status, previewBlob, encodeFile, encodeBatch, decodeFile, reset };

@@ -1,7 +1,7 @@
 {
     "name": "docvault-web",
     "private": true,
-    "version": "1.0.0",
+    "version": "1.2.0",
     "type": "module",
     "scripts": {
         "dev": "vite",
@@ -9,6 +9,8 @@
         "preview": "vite preview"
     },
     "dependencies": {
+        "@fontsource-variable/syne": "^5.3.0",
+        "@fontsource/dm-mono": "^5.3.0",
         "docvault-core": "file:../crates/docvault-core/pkg",
         "lucide-react": "^0.577.0",
         "react": "^18.3.1",

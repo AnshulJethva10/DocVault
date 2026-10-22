@@ -3,7 +3,8 @@
  *
  * Creates valid AVI files using the MPNG (Motion PNG) codec, where each
  * video frame is a complete, lossless PNG image. Playable in VLC, FFmpeg,
- * MPV, and most major video players.
+ * MPV, and most major video players. Byte-for-byte identical to the Rust
+ * implementation in `crates/docvault-cli/src/avi.rs`.
  *
  * RIFF/AVI structure:
  *   RIFF 'AVI '
@@ -12,11 +13,20 @@
  *   │   └── LIST 'strl'
  *   │       ├── 'strh'  (AVISTREAMHEADER)
  *   │       └── 'strf'  (BITMAPINFOHEADER, biCompression='MPNG')
- *   └── LIST 'movi'
- *       ├── '00dc'  (PNG frame 1)
- *       ├── '00dc'  (PNG frame 2)
- *       └── ...
+ *   ├── LIST 'movi'
+ *   │   ├── '00dc'  (PNG frame 1)
+ *   │   ├── '00dc'  (PNG frame 2)
+ *   │   └── ...
+ *   └── 'idx1'  (one 16-byte entry per frame)
  */
+
+/** AVIF_HASINDEX: the file ends with an 'idx1' chunk. */
+const AVIF_HASINDEX = 0x10;
+/** AVIIF_KEYFRAME: every MPNG frame is independently decodable. */
+const AVIIF_KEYFRAME = 0x10;
+const IDX1_ENTRY = 16;
+/** RIFF sizes are 32-bit. */
+const MAX_RIFF_SIZE = 0xffffffff;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -37,235 +47,164 @@ function readFourCC(view: DataView, offset: number): string {
   );
 }
 
+/** Size of a chunk's data including the RIFF word-alignment pad byte. */
+function padded(size: number): number {
+  return size + (size % 2);
+}
+
 // ─── AVI Muxer ──────────────────────────────────────────────────────────────
 
 /**
- * Create a valid AVI file from multiple PNG frame blobs.
+ * Create a valid AVI file from PNG frames.
  *
  * Each frame is stored as a lossless PNG inside a '00dc' chunk using the
- * MPNG (Motion PNG) codec. The resulting AVI is playable in VLC, FFmpeg,
- * and most video players that support the PNG video codec.
+ * MPNG (Motion PNG) codec, followed by an 'idx1' index.
  *
- * @param pngBlobs  Array of PNG image Blobs (one per frame)
- * @param width     Frame width in pixels
- * @param height    Frame height in pixels
- * @param fps       Frames per second (default: 1)
- * @returns         A Blob containing the complete AVI file
+ * @param frames  PNG file bytes, one entry per frame
+ * @param width   Frame width in pixels
+ * @param height  Frame height in pixels
+ * @param fps     Frames per second (default: 1)
  */
-export async function createAviFromPngFrames(
-  pngBlobs: Blob[],
+export function createAviFromPngFrames(
+  frames: Uint8Array[],
   width: number,
   height: number,
   fps: number = 1,
-): Promise<Blob> {
-  if (pngBlobs.length === 0) {
+): Blob {
+  if (frames.length === 0) {
     throw new Error("Cannot create AVI: no PNG frames were provided");
   }
 
-  // Convert PNG blobs to ArrayBuffers
-  const frames: ArrayBuffer[] = [];
-  for (const blob of pngBlobs) {
-    frames.push(await blob.arrayBuffer());
-  }
-
   const frameCount = frames.length;
-  const maxFrameSize = Math.max(...frames.map((f) => f.byteLength));
+  const maxFrameSize = frames.reduce((m, f) => Math.max(m, f.byteLength), 0);
 
   // ── Calculate sizes ──────────────────────────────────────────────────
-  // avih chunk: 8 (id+size) + 56 (data) = 64
   const avihDataSize = 56;
   const avihChunkSize = 8 + avihDataSize;
-
-  // strh chunk: 8 + 56 = 64
   const strhDataSize = 56;
   const strhChunkSize = 8 + strhDataSize;
-
-  // strf chunk: 8 + 40 = 48
   const strfDataSize = 40;
   const strfChunkSize = 8 + strfDataSize;
 
-  // strl LIST: 12 (LIST+size+'strl') + strh + strf
   const strlContentSize = 4 + strhChunkSize + strfChunkSize; // 'strl' + chunks
-  const strlTotalSize = 8 + strlContentSize; // LIST + size + content
-
-  // hdrl LIST: 12 + avih + strl
+  const strlTotalSize = 8 + strlContentSize;
   const hdrlContentSize = 4 + avihChunkSize + strlTotalSize; // 'hdrl' + chunks
   const hdrlTotalSize = 8 + hdrlContentSize;
 
-  // movi LIST: 12 + frame chunks
   let moviFrameDataSize = 0;
   for (const frame of frames) {
-    moviFrameDataSize += 8 + frame.byteLength; // chunk header + data
-    if (frame.byteLength % 2 !== 0) moviFrameDataSize += 1; // padding
+    moviFrameDataSize += 8 + padded(frame.byteLength);
   }
   const moviContentSize = 4 + moviFrameDataSize; // 'movi' + frame chunks
   const moviTotalSize = 8 + moviContentSize;
 
-  // Total RIFF size = 4 ('AVI ') + hdrl + movi
-  const riffContentSize = 4 + hdrlTotalSize + moviTotalSize;
-  const totalFileSize = 8 + riffContentSize; // RIFF + size + content
+  const idx1ContentSize = IDX1_ENTRY * frameCount;
+  const idx1TotalSize = 8 + idx1ContentSize;
+
+  const riffContentSize = 4 + hdrlTotalSize + moviTotalSize + idx1TotalSize;
+  if (riffContentSize > MAX_RIFF_SIZE) {
+    throw new Error("Vault is too large for an AVI file (4 GiB limit)");
+  }
+  const totalFileSize = 8 + riffContentSize;
 
   // ── Build the binary ─────────────────────────────────────────────────
   const buffer = new ArrayBuffer(totalFileSize);
   const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
   let pos = 0;
+  const fourcc = (s: string) => {
+    writeFourCC(view, pos, s);
+    pos += 4;
+  };
+  const u32 = (v: number) => {
+    view.setUint32(pos, v, true);
+    pos += 4;
+  };
+  const i32 = (v: number) => {
+    view.setInt32(pos, v, true);
+    pos += 4;
+  };
+  const u16 = (v: number) => {
+    view.setUint16(pos, v, true);
+    pos += 2;
+  };
+  const i16 = (v: number) => {
+    view.setInt16(pos, v, true);
+    pos += 2;
+  };
 
   // ── RIFF header ──
-  writeFourCC(view, pos, "RIFF");
-  pos += 4;
-  view.setUint32(pos, riffContentSize, true);
-  pos += 4;
-  writeFourCC(view, pos, "AVI ");
-  pos += 4;
+  fourcc("RIFF"); u32(riffContentSize); fourcc("AVI ");
 
   // ── hdrl LIST ──
-  writeFourCC(view, pos, "LIST");
-  pos += 4;
-  view.setUint32(pos, hdrlContentSize, true);
-  pos += 4;
-  writeFourCC(view, pos, "hdrl");
-  pos += 4;
+  fourcc("LIST"); u32(hdrlContentSize); fourcc("hdrl");
 
   // ── avih chunk (AVIMAINHEADER, 56 bytes) ──
-  writeFourCC(view, pos, "avih");
-  pos += 4;
-  view.setUint32(pos, avihDataSize, true);
-  pos += 4;
-
-  const microSecPerFrame = Math.round(1_000_000 / fps);
-  view.setUint32(pos, microSecPerFrame, true);
-  pos += 4; // dwMicroSecPerFrame
-  view.setUint32(pos, 0, true);
-  pos += 4; // dwMaxBytesPerSec
-  view.setUint32(pos, 0, true);
-  pos += 4; // dwPaddingGranularity
-  view.setUint32(pos, 0x10, true);
-  pos += 4; // dwFlags (AVIF_HASINDEX)
-  view.setUint32(pos, frameCount, true);
-  pos += 4; // dwTotalFrames
-  view.setUint32(pos, 0, true);
-  pos += 4; // dwInitialFrames
-  view.setUint32(pos, 1, true);
-  pos += 4; // dwStreams
-  view.setUint32(pos, maxFrameSize, true);
-  pos += 4; // dwSuggestedBufferSize
-  view.setUint32(pos, width, true);
-  pos += 4; // dwWidth
-  view.setUint32(pos, height, true);
-  pos += 4; // dwHeight
-  // dwReserved[4]
-  view.setUint32(pos, 0, true);
-  pos += 4;
-  view.setUint32(pos, 0, true);
-  pos += 4;
-  view.setUint32(pos, 0, true);
-  pos += 4;
-  view.setUint32(pos, 0, true);
-  pos += 4;
+  fourcc("avih"); u32(avihDataSize);
+  u32(Math.round(1_000_000 / fps)); // dwMicroSecPerFrame
+  u32(0);                           // dwMaxBytesPerSec
+  u32(0);                           // dwPaddingGranularity
+  u32(AVIF_HASINDEX);               // dwFlags
+  u32(frameCount);                  // dwTotalFrames
+  u32(0);                           // dwInitialFrames
+  u32(1);                           // dwStreams
+  u32(maxFrameSize);                // dwSuggestedBufferSize
+  u32(width);                       // dwWidth
+  u32(height);                      // dwHeight
+  u32(0); u32(0); u32(0); u32(0);   // dwReserved[4]
 
   // ── strl LIST ──
-  writeFourCC(view, pos, "LIST");
-  pos += 4;
-  view.setUint32(pos, strlContentSize, true);
-  pos += 4;
-  writeFourCC(view, pos, "strl");
-  pos += 4;
+  fourcc("LIST"); u32(strlContentSize); fourcc("strl");
 
   // ── strh chunk (AVISTREAMHEADER, 56 bytes) ──
-  writeFourCC(view, pos, "strh");
-  pos += 4;
-  view.setUint32(pos, strhDataSize, true);
-  pos += 4;
-
-  writeFourCC(view, pos, "vids");
-  pos += 4; // fccType
-  writeFourCC(view, pos, "MPNG");
-  pos += 4; // fccHandler
-  view.setUint32(pos, 0, true);
-  pos += 4; // dwFlags
-  view.setUint16(pos, 0, true);
-  pos += 2; // wPriority
-  view.setUint16(pos, 0, true);
-  pos += 2; // wLanguage
-  view.setUint32(pos, 0, true);
-  pos += 4; // dwInitialFrames
-  view.setUint32(pos, 1, true);
-  pos += 4; // dwScale
-  view.setUint32(pos, fps, true);
-  pos += 4; // dwRate
-  view.setUint32(pos, 0, true);
-  pos += 4; // dwStart
-  view.setUint32(pos, frameCount, true);
-  pos += 4; // dwLength
-  view.setUint32(pos, maxFrameSize, true);
-  pos += 4; // dwSuggestedBufferSize
-  view.setUint32(pos, 0xffffffff, true);
-  pos += 4; // dwQuality (-1)
-  view.setUint32(pos, 0, true);
-  pos += 4; // dwSampleSize
-  // rcFrame: left, top, right, bottom (each WORD = 2 bytes)
-  view.setInt16(pos, 0, true);
-  pos += 2; // left
-  view.setInt16(pos, 0, true);
-  pos += 2; // top
-  view.setInt16(pos, width, true);
-  pos += 2; // right
-  view.setInt16(pos, height, true);
-  pos += 2; // bottom
+  fourcc("strh"); u32(strhDataSize);
+  fourcc("vids");     // fccType
+  fourcc("MPNG");     // fccHandler
+  u32(0);             // dwFlags
+  u16(0);             // wPriority
+  u16(0);             // wLanguage
+  u32(0);             // dwInitialFrames
+  u32(1);             // dwScale
+  u32(fps);           // dwRate
+  u32(0);             // dwStart
+  u32(frameCount);    // dwLength
+  u32(maxFrameSize);  // dwSuggestedBufferSize
+  u32(0xffffffff);    // dwQuality (-1)
+  u32(0);             // dwSampleSize
+  i16(0); i16(0); i16(width); i16(height); // rcFrame
 
   // ── strf chunk (BITMAPINFOHEADER, 40 bytes) ──
-  writeFourCC(view, pos, "strf");
-  pos += 4;
-  view.setUint32(pos, strfDataSize, true);
-  pos += 4;
-
-  view.setUint32(pos, 40, true);
-  pos += 4; // biSize
-  view.setInt32(pos, width, true);
-  pos += 4; // biWidth
-  view.setInt32(pos, height, true);
-  pos += 4; // biHeight
-  view.setUint16(pos, 1, true);
-  pos += 2; // biPlanes
-  view.setUint16(pos, 32, true);
-  pos += 2; // biBitCount (RGBA)
-  writeFourCC(view, pos, "MPNG");
-  pos += 4; // biCompression
-  view.setUint32(pos, 0, true);
-  pos += 4; // biSizeImage
-  view.setInt32(pos, 0, true);
-  pos += 4; // biXPelsPerMeter
-  view.setInt32(pos, 0, true);
-  pos += 4; // biYPelsPerMeter
-  view.setUint32(pos, 0, true);
-  pos += 4; // biClrUsed
-  view.setUint32(pos, 0, true);
-  pos += 4; // biClrImportant
+  fourcc("strf"); u32(strfDataSize);
+  u32(40);        // biSize
+  i32(width);     // biWidth
+  i32(height);    // biHeight
+  u16(1);         // biPlanes
+  u16(32);        // biBitCount (RGBA)
+  fourcc("MPNG"); // biCompression
+  u32(0);         // biSizeImage
+  i32(0);         // biXPelsPerMeter
+  i32(0);         // biYPelsPerMeter
+  u32(0);         // biClrUsed
+  u32(0);         // biClrImportant
 
   // ── movi LIST ──
-  writeFourCC(view, pos, "LIST");
-  pos += 4;
-  view.setUint32(pos, moviContentSize, true);
-  pos += 4;
-  writeFourCC(view, pos, "movi");
-  pos += 4;
-
-  // ── Video frame chunks ('00dc') ──
+  fourcc("LIST"); u32(moviContentSize); fourcc("movi");
   for (const frame of frames) {
-    writeFourCC(view, pos, "00dc");
-    pos += 4;
-    view.setUint32(pos, frame.byteLength, true);
-    pos += 4;
+    fourcc("00dc");
+    u32(frame.byteLength);
+    bytes.set(frame, pos);
+    pos += padded(frame.byteLength); // ArrayBuffer is zero-filled, so the pad byte is 0
+  }
 
-    const frameBytes = new Uint8Array(frame);
-    new Uint8Array(buffer, pos, frame.byteLength).set(frameBytes);
-    pos += frame.byteLength;
-
-    // RIFF requires word-aligned chunks
-    if (frame.byteLength % 2 !== 0) {
-      view.setUint8(pos, 0);
-      pos += 1;
-    }
+  // ── idx1 (offsets are relative to the 'movi' FourCC) ──
+  fourcc("idx1"); u32(idx1ContentSize);
+  let offset = 4;
+  for (const frame of frames) {
+    fourcc("00dc");
+    u32(AVIIF_KEYFRAME);
+    u32(offset);
+    u32(frame.byteLength);
+    offset += 8 + padded(frame.byteLength);
   }
 
   return new Blob([buffer], { type: "video/avi" });
@@ -276,82 +215,61 @@ export async function createAviFromPngFrames(
 /**
  * Extract PNG frame data from an AVI file created by DocVault.
  *
- * Parses the RIFF/AVI structure, locates the 'movi' list,
- * and extracts all '00dc' video frame chunks as PNG Blobs.
- *
- * @param file  The .avi File object
- * @returns     Array of PNG Blobs (one per frame)
+ * Parses the RIFF/AVI structure, locates the 'movi' list, and returns every
+ * '00dc' video frame chunk as a view into `buffer` (no copies). All chunk
+ * sizes are untrusted and bounds-checked.
  */
-export async function extractPngFramesFromAvi(file: File): Promise<Blob[]> {
-  const arrayBuffer = await file.arrayBuffer();
-  const view = new DataView(arrayBuffer);
-  let pos = 0;
+export function parseAviFrames(buffer: ArrayBuffer): Uint8Array[] {
+  const view = new DataView(buffer);
+  const len = buffer.byteLength;
 
-  // Validate RIFF header
-  const riffId = readFourCC(view, pos);
-  pos += 4;
-  if (riffId !== "RIFF") {
+  if (len < 12 || readFourCC(view, 0) !== "RIFF") {
     throw new Error("Not a valid RIFF file");
   }
-
-  pos += 4; // skip RIFF size
-
-  const aviId = readFourCC(view, pos);
-  pos += 4;
-  if (aviId !== "AVI ") {
+  if (readFourCC(view, 8) !== "AVI ") {
     throw new Error("Not a valid AVI file");
   }
 
-  // Walk through top-level chunks to find 'movi' LIST
-  const pngFrames: Blob[] = [];
+  const pngFrames: Uint8Array[] = [];
+  let pos = 12;
 
-  while (pos < arrayBuffer.byteLength - 8) {
+  while (pos + 8 <= len) {
     const chunkId = readFourCC(view, pos);
-    pos += 4;
-    const chunkSize = view.getUint32(pos, true);
-    pos += 4;
+    const chunkSize = view.getUint32(pos + 4, true);
+    const body = pos + 8;
 
-    if (chunkId === "LIST") {
-      const listType = readFourCC(view, pos);
+    if (chunkId === "LIST" && body + 4 <= len && readFourCC(view, body) === "movi") {
+      const moviEnd = Math.min(body + chunkSize, len);
+      pos = body + 4; // skip 'movi'
 
-      if (listType === "movi") {
-        // Parse the movi list to extract frame chunks
-        const moviEnd = pos + chunkSize; // pos is at start of data, data is chunkSize bytes
-        pos += 4; // skip list type ('movi')
-
-        while (pos < moviEnd - 8) {
-          const frameId = readFourCC(view, pos);
-          pos += 4;
-          const frameSize = view.getUint32(pos, true);
-          pos += 4;
-
-          if (frameId === "00dc") {
-            // This is a video frame — extract its PNG data
-            const pngData = arrayBuffer.slice(pos, pos + frameSize);
-            pngFrames.push(new Blob([pngData], { type: "image/png" }));
+      while (pos + 8 <= moviEnd) {
+        const frameId = readFourCC(view, pos);
+        const frameSize = view.getUint32(pos + 4, true);
+        const start = pos + 8;
+        if (frameId === "00dc") {
+          if (start + frameSize > len) {
+            throw new Error(
+              `AVI frame data truncated at offset ${start} (need ${frameSize} bytes, have ${len - start})`,
+            );
           }
-
-          pos += frameSize;
-          // Word-align
-          if (frameSize % 2 !== 0) pos += 1;
+          pngFrames.push(new Uint8Array(buffer, start, frameSize));
         }
-        break; // found movi, done
-      } else {
-        // Skip this LIST entirely (hdrl, etc.)
-        // chunkSize covers the full data block (including the listType we peeked at)
-        pos += chunkSize;
-        if (chunkSize % 2 !== 0) pos += 1;
+        pos = start + padded(frameSize);
       }
-    } else {
-      // Skip non-LIST chunk
-      pos += chunkSize;
-      if (chunkSize % 2 !== 0) pos += 1;
+      break; // found movi, done
     }
+
+    // Skip any other LIST or chunk (hdrl, INFO, idx1, JUNK, ...)
+    pos = body + padded(chunkSize);
   }
 
   if (pngFrames.length === 0) {
     throw new Error("No video frames found in AVI file");
   }
-
   return pngFrames;
+}
+
+/** Convenience wrapper: read a Blob/File and extract its PNG frames. */
+export async function extractPngFramesFromAvi(file: Blob): Promise<Uint8Array[]> {
+  return parseAviFrames(await file.arrayBuffer());
 }
